@@ -2,9 +2,13 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"github.com/jhillyerd/enmime"
+	"github.com/joho/godotenv"
 	"github.com/lithammer/fuzzysearch/fuzzy"
+	"golang.org/x/net/context"
 	"golang.org/x/net/idna"
+	"google.golang.org/genai"
 	"log"
 	"math"
 	"net/mail"
@@ -19,6 +23,23 @@ var Email struct {
 	Text    string
 	HTML    string
 }
+
+func mustGetenv(k string) string {
+	v := os.Getenv(k)
+	if v == "" {
+		log.Fatalf("%s not set", k)
+	}
+	return v
+}
+
+func init() {
+	_ = godotenv.Load() // silently ignore if .env is missing in prod
+}
+
+var (
+	openRouterKey = mustGetenv("OPENROUTER_API_KEY")
+	geminiKey     = mustGetenv("GEMINI_API_KEY")
+)
 
 func parseEmail() {
 	f, err := os.Open("test.eml")
@@ -111,4 +132,64 @@ func checkDomainReal(db *sql.DB, domainReal string) (bool, string, error) {
 
 	// 6) No close matches → treat as real (or benign typo)
 	return true, ascii, nil
+}
+
+//func whoTheyAre() {
+//	prompt := "This is the plain text email: " + Email.Text + " This is the HTML email: " + Email.HTML + "\n Please tell me the company they are trying to be."
+//	client := openrouter.NewClient(
+//		openRouterKey,
+//		openrouter.WithXTitle("Email Checker"),
+//		openrouter.WithHTTPReferer("https://adamkhattab.co.uk"),
+//	)
+//	resp, err := client.CreateChatCompletion(
+//		context.Background(),
+//		openrouter.ChatCompletionRequest{
+//			Model: "deepseek/deepseek-r1:free",
+//			Messages: []openrouter.ChatCompletionMessage{
+//				{
+//					Role:    openrouter.ChatMessageRoleUser,
+//					Content: openrouter.Content{Text: prompt},
+//				},
+//				{
+//					Role:    openrouter.ChatMessageRoleSystem,
+//					Content: openrouter.Content{Text: "You are a bot that identifies companies from emails. You only respond with the company name in plain text with no additional characters or information."},
+//				},
+//			},
+//		},
+//	)
+//
+//	if err != nil {
+//		fmt.Printf("ChatCompletion error: %v\n", err)
+//		return
+//	}
+//
+//	fmt.Println(resp.Choices[0].Message.Content)
+//
+//}
+
+func whoTheyAre() {
+	prompt := "This is the plain text email: " + Email.Text + " This is the HTML email: " + Email.HTML + "\n Please tell me the company they are trying to be."
+	systemPrompt := "You are a bot that identifies companies from emails. You only respond with the company name in plain text with no additional characters or information."
+	ctx := context.Background()
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey:  geminiKey,
+		Backend: genai.BackendGeminiAPI,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	config := &genai.GenerateContentConfig{
+		SystemInstruction: genai.NewContentFromText(systemPrompt, genai.RoleUser),
+	}
+	result, err := client.Models.GenerateContent(
+		ctx,
+		"gemini-1.5-flash-8b",
+		genai.Text(prompt),
+		config,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(result.Text())
+
 }

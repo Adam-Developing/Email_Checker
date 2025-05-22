@@ -28,4 +28,6 @@ func main() {
 	} else {
 		log.Println("Domain is not real, We believe they are trying to impersonate ", domain)
 	}
+	whoTheyAre()
+
 }
