@@ -1,7 +1,0 @@
-[package]
-name = "Email_Verifier"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-mailparse = "0.16.1"
