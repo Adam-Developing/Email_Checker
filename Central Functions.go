@@ -85,14 +85,14 @@ func htmlToText(src string) string {
 				b.WriteString(txt)
 				b.WriteByte(' ')
 			}
-		case html.StartTagToken, html.EndTagToken:
+		case html.StartTagToken, html.EndTagToken, html.SelfClosingTagToken:
 			name, _ := z.TagName()
 			switch strings.ToLower(string(name)) {
 			case "p", "br", "div", "li", "tr", "hr":
 				writeNL()
 			}
-		default:
-			panic("unhandled default case")
+		case html.CommentToken, html.DoctypeToken:
+			// ignore
 		}
 	}
 }
@@ -171,7 +171,7 @@ func imgSrcs(htmlStr string) []string {
 				}
 			}
 		default:
-			panic("unhandled default case")
+			// ignore other token types
 		}
 	}
 }
