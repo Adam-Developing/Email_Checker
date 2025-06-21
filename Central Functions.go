@@ -44,7 +44,7 @@ func newClientWithDefaultHeaders() *http.Client {
 	defaultHeaders := http.Header{
 		"User-Agent":      {"Adam Khattab's Spam Email Checker/1.0 (https://adamkhattab.co.uk)"},
 		"Accept":          {"*/*"},
-		"Accept-Encoding": {"gzip, deflate, br"},
+		"Accept-Encoding": {"json, deflate, br"},
 		"Connection":      {"keep-alive"},
 		// Add more if needed
 	}
@@ -56,7 +56,7 @@ func newClientWithDefaultHeaders() *http.Client {
 	}
 }
 
-var fileName = "spam1.eml"
+var fileName = "spam6-Coinbase Login.eml"
 
 type EmailAnalysis struct {
 	CompanyFound    bool   `json:"companyFound"`
@@ -482,7 +482,7 @@ func checkDomainReal(db *sql.DB, domainReal string) (bool, string, error) {
 //
 //}
 
-func whoTheyAre() (EmailAnalysis, error) {
+func whoTheyAre(initial bool) (EmailAnalysis, error) {
 	// Read raw EML
 	f, err := os.Open(fileName)
 	if err != nil {
@@ -496,30 +496,49 @@ func whoTheyAre() (EmailAnalysis, error) {
 	if err != nil {
 		return EmailAnalysis{}, err
 	}
-
-	// Build prompt
-	prompt := "This is the full EML file:\n" + string(raw) +
-		"\nPlease identify the company they are pretending to be (UNKNOWN if none), give a one short sentence summary of the sender's request, and comment briefly on how realistic the email is. Realistic is determined by what they are telling you to do or telling you about and how likely it is to be true."
-
+	var prompt string
+	if initial {
+		// Build prompt
+		prompt = "This is the full EML file:\n" + string(raw) +
+			"\nPlease identify the company they are pretending to be (UNKNOWN if none), give a one short sentence summary of the sender's request, and comment briefly on how realistic the email is. Realistic is determined by what they are telling you to do or telling you about and how likely it is to be true."
+	} else {
+		prompt = "This is the email subject: " + Email.Subject + "\n The from email address: " + Email.From +
+			" \n There is a full screenshot of the email attached. Please identify the company they are pretending to be (UNKNOWN if none), give a one short sentence summary of the sender's request, and comment briefly on how realistic the email is. Realistic is determined by what they are telling you to do or telling you about and how likely it is to be true."
+	}
 	// Gather image attachments until size cap
 	const maxReqBytes = 20 << 20 // 20 MiB
 	used := len(prompt)
 	var contents []*genai.Content
-	if items, err := os.ReadDir("attachments"); err == nil {
-		for _, it := range items {
-			if it.IsDir() {
-				continue
-			}
-			b, err := os.ReadFile(filepath.Join("attachments", it.Name()))
-			if err != nil {
-				continue
-			}
+
+	if !initial && screenshotFileName != "" {
+		filePath := filepath.Join("screenshots", screenshotFileName)
+		b, err := os.ReadFile(filePath)
+		if err == nil {
 			if emailMime := http.DetectContentType(b); strings.HasPrefix(emailMime, "image/") {
-				if used+len(b) > maxReqBytes {
-					break
+				if used+len(b) <= maxReqBytes {
+					contents = append(contents, genai.NewContentFromBytes(b, emailMime, ""))
+					used += len(b)
 				}
-				contents = append(contents, genai.NewContentFromBytes(b, emailMime, ""))
-				used += len(b)
+			}
+		}
+	} else {
+
+		if items, err := os.ReadDir("attachments"); err == nil {
+			for _, it := range items {
+				if it.IsDir() {
+					continue
+				}
+				b, err := os.ReadFile(filepath.Join("attachments", it.Name()))
+				if err != nil {
+					continue
+				}
+				if emailMime := http.DetectContentType(b); strings.HasPrefix(emailMime, "image/") {
+					if used+len(b) > maxReqBytes {
+						break
+					}
+					contents = append(contents, genai.NewContentFromBytes(b, emailMime, ""))
+					used += len(b)
+				}
 			}
 		}
 	}
@@ -607,6 +626,7 @@ func verifyCompany(db *sql.DB, whoTheyAreResult EmailAnalysis) (bool, error) {
 		return false, err
 	}
 	body, _ := io.ReadAll(resp.Body)
+
 	err = resp.Body.Close()
 	if err != nil {
 		return false, err

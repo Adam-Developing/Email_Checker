@@ -71,7 +71,7 @@ func main() {
 	} else {
 		log.Println("A similar domain is in the known database, We believe they are trying to impersonate ", domain)
 	}
-	whoTheyAreResult, err := whoTheyAre()
+	whoTheyAreResult, err := whoTheyAre(true)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
@@ -107,4 +107,46 @@ func main() {
 	}
 
 	log.Println("The reason for this is:", whoTheyAreResult.RealisticReason)
+
+	log.Println("------------ NOW IT IS CHECKING A RENDERED VERSION OF THE EMAIL -----------")
+	// Render the email HTML in a headless browser and take a screenshot
+	RenderEmailHTML()
+
+	whoTheyAreResult, err = whoTheyAre(false)
+	if err != nil {
+		log.Fatal(err.Error())
+	}
+	if whoTheyAreResult.CompanyFound {
+		log.Println("Gemini identified them as", whoTheyAreResult.CompanyName)
+
+	} else {
+		log.Println("Gemini could not identify them, but they are likely a scammer")
+	}
+	if whoTheyAreResult.CompanyFound {
+		Verified, err2 := verifyCompany(db, whoTheyAreResult)
+		if err2 != nil {
+			log.Fatal(err2.Error())
+			return
+		}
+		if Verified {
+			log.Println("We could verify their domain with who they are trying to be")
+		} else {
+			log.Println("We could not verify their domain with who they are trying to be.")
+		}
+	}
+	if whoTheyAreResult.ActionRequired {
+		log.Println("They have an action they want you to do:", whoTheyAreResult.Action)
+	} else {
+		log.Println("They do not want you to do anything.")
+	}
+	log.Println("This is a short summary of the email:", whoTheyAreResult.SummaryOfEmail)
+
+	if whoTheyAreResult.Realistic {
+		log.Println("Gemini believes the email is realistic")
+	} else {
+		log.Println("Gemini believes the email is not realistic")
+	}
+
+	log.Println("The reason for this is:", whoTheyAreResult.RealisticReason)
+
 }
