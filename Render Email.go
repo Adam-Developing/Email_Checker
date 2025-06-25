@@ -13,6 +13,7 @@ import (
 // RenderEmailHTML takes the HTML content from the Email struct,
 // renders it in a headless browser, and takes a full screenshot of the page.
 // The screenshot is saved to a file in the current directory.
+
 var screenshotFileName string
 
 func RenderEmailHTML() {
@@ -20,7 +21,6 @@ func RenderEmailHTML() {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.DisableGPU,
 		chromedp.NoSandbox,
-		chromedp.Flag("disable-cookies", true),
 		chromedp.Flag("disable-extensions", true),
 		chromedp.Flag("incognito", true),
 	)
