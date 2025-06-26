@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	_ "github.com/glebarez/sqlite" // pure Go, no cgo needed
 	"github.com/joho/godotenv"
@@ -9,6 +10,62 @@ import (
 	"net/http"
 	"os"
 )
+
+// --- Structs for JSON Output ---
+
+type DomainAnalysisResult struct {
+	Status        string `json:"status"`
+	Message       string `json:"message"`
+	MatchedDomain string `json:"matchedDomain"`
+	ScoreImpact   int    `json:"scoreImpact"`
+}
+
+type CompanyVerificationResult struct {
+	Verified    bool   `json:"verified"`
+	Message     string `json:"message"`
+	ScoreImpact int    `json:"scoreImpact"`
+}
+
+type ActionAnalysisResult struct {
+	ActionRequired bool   `json:"actionRequired"`
+	Action         string `json:"action"`
+}
+
+type RealismAnalysisResult struct {
+	IsRealistic bool   `json:"isRealistic"`
+	Reason      string `json:"reason"`
+	ScoreImpact int    `json:"scoreImpact"`
+}
+
+type ContentAnalysisResult struct {
+	CompanyIdentified   bool                      `json:"companyIdentified"`
+	CompanyName         string                    `json:"companyName,omitempty"`
+	CompanyVerification CompanyVerificationResult `json:"companyVerification"`
+	ActionAnalysis      ActionAnalysisResult      `json:"actionAnalysis"`
+	Summary             string                    `json:"summary"`
+	RealismAnalysis     RealismAnalysisResult     `json:"realismAnalysis"`
+}
+
+type ScoreResult struct {
+	BaseScore          int     `json:"baseScore"`
+	FinalScoreNormal   int     `json:"finalScoreNormal"`
+	FinalScoreRendered int     `json:"finalScoreRendered"`
+	MaxPossibleScore   float64 `json:"maxPossibleScore"`
+	NormalPercentage   float64 `json:"normalPercentage"`
+	RenderedPercentage float64 `json:"renderedPercentage"`
+}
+
+type FinalResult struct {
+	EmailFile        string                `json:"emailFile"`
+	SuspectDomain    string                `json:"suspectDomain"`
+	SuspectSubdomain string                `json:"suspectSubdomain"`
+	DomainAnalysis   DomainAnalysisResult  `json:"domainAnalysis"`
+	TextAnalysis     ContentAnalysisResult `json:"textAnalysis"`
+	RenderedAnalysis ContentAnalysisResult `json:"renderedAnalysis"`
+	Scores           ScoreResult           `json:"scores"`
+}
+
+// --- Global Variables & Existing Functions ---
 
 var baseScore = 0
 var finalScoreNormal = 0
@@ -23,7 +80,6 @@ var fileName = "spam7.eml"
 
 func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	for k, v := range h.headers {
-		// Set only if not already explicitly set
 		if req.Header.Get(k) == "" {
 			req.Header[k] = v
 		}
@@ -35,7 +91,6 @@ func init() {
 	if err := godotenv.Load(); err != nil {
 		log.Printf(".env file not found: %v\n", err)
 	}
-	//openRouterKey = os.Getenv("OPENROUTER_API_KEY")
 	geminiKey = os.Getenv("GEMINI_API_KEY")
 	googleSearchAPIKey = os.Getenv("GOOGLE_SEARCH_API_KEY")
 	googleSearchCX = os.Getenv("GOOGLE_SEARCH_CX")
@@ -43,22 +98,32 @@ func init() {
 }
 
 var (
-	//openRouterKey      string
 	geminiKey          string
 	googleSearchAPIKey string
 	googleSearchCX     string
 	mainPrompt         string
 )
 
+// --- Main Application Logic ---
+
 func main() {
+	// Initialize the final result structure
+	finalResult := FinalResult{
+		EmailFile: fileName,
+	}
+
+	// File system setup
 	if err := os.RemoveAll("attachments"); err != nil {
 		log.Fatal(err)
 	}
-	// recreate the now-missing folder for later writes
 	_ = os.Mkdir("attachments", 0o755)
 
+	// Parse the email file
 	parseEmail()
+	finalResult.SuspectDomain = Email.Domain
+	finalResult.SuspectSubdomain = Email.subDomain
 
+	// Database setup
 	db, err := sql.Open("sqlite", "wikidata_websites4.db")
 	if err != nil {
 		log.Fatal(err)
@@ -70,119 +135,108 @@ func main() {
 		}
 	}(db)
 
+	// --- Domain Analysis ---
 	DomainReal, domain, err := checkDomainReal(db, Email.Domain)
 	if err != nil {
-		log.Fatal(err.Error())
-	}
-	log.Println("Suspect is " + Email.Domain + " and subdomain is " + Email.subDomain)
-	if DomainReal == 0 {
-		baseScore += AllChecks[2].Impact // DomainImpersonation
-		log.Println("A similar domain is in the known database, We believe they are trying to impersonate", domain, fmt.Sprintf("(Score: %+d)", AllChecks[2].Impact))
-	} else if DomainReal == 1 {
-		baseScore += AllChecks[0].Impact // DomainExactMatch
-		log.Println("Domain is in the known database exactly domain:", domain, fmt.Sprintf("(Score: %+d)", AllChecks[0].Impact))
-	} else if DomainReal == 2 {
-		baseScore += AllChecks[1].Impact // DomainNoSimilarity
-		log.Println("Domain is not in the known database, and there are no similarities, domain:", domain, fmt.Sprintf("(Score: %+d)", AllChecks[1].Impact))
+		//log.Fatal(err.Error())
+		// TODO handle error gracefully
 	}
 
-	whoTheyAreResult, err := whoTheyAre(true)
+	finalResult.DomainAnalysis.MatchedDomain = domain
+	switch DomainReal {
+	case 0: // Impersonation
+		baseScore += AllChecks[2].Impact
+		finalResult.DomainAnalysis.Status = "DomainImpersonation"
+		finalResult.DomainAnalysis.Message = fmt.Sprintf("A similar domain '%s' is in the known database. This is likely an attempt to impersonate a legitimate entity.", domain)
+		finalResult.DomainAnalysis.ScoreImpact = AllChecks[2].Impact
+	case 1: // Exact Match
+		baseScore += AllChecks[0].Impact
+		finalResult.DomainAnalysis.Status = "DomainExactMatch"
+		finalResult.DomainAnalysis.Message = "Domain is in the known database."
+		finalResult.DomainAnalysis.ScoreImpact = AllChecks[0].Impact
+	case 2: // No Similarity
+		baseScore += AllChecks[1].Impact
+		finalResult.DomainAnalysis.Status = "DomainNoSimilarity"
+		finalResult.DomainAnalysis.Message = "Domain is not in the known database, and no similarities were found."
+		finalResult.DomainAnalysis.ScoreImpact = AllChecks[1].Impact
+	}
+
+	// --- Normal (Text) Analysis ---
+	whoTheyAreResultNormal, err := whoTheyAre(true)
 	if err != nil {
-		log.Fatal(err.Error())
+		//log.Fatal(err.Error())
+		// TODO handle error gracefully
 	}
-	if whoTheyAreResult.CompanyFound {
-		finalScoreNormal += AllChecks[3].Impact // CompanyIdentified
-		log.Println("Gemini identified them as", whoTheyAreResult.CompanyName, fmt.Sprintf("(Score: %+d)", AllChecks[3].Impact))
-	} else {
-		finalScoreNormal -= AllChecks[3].Impact // CompanyIdentified
-		log.Println("Gemini could not identify them, but they are likely a scammer", fmt.Sprintf("(Score: %+d)", -AllChecks[3].Impact))
-	}
+	// Populate text analysis results
+	populateContentAnalysis(&finalResult.TextAnalysis, &finalScoreNormal, whoTheyAreResultNormal, db)
 
-	if whoTheyAreResult.CompanyFound {
-		Verified, err2 := verifyCompany(db, whoTheyAreResult)
-		if err2 != nil {
-			log.Fatal(err2.Error())
-			return
-		}
-		if Verified {
-			finalScoreNormal += AllChecks[4].Impact // CompanyVerified
-			log.Println("We could verify their domain with who they are trying to be", fmt.Sprintf("(Score: %+d)", AllChecks[4].Impact))
-		} else {
-			finalScoreNormal -= AllChecks[4].Impact
-			log.Println("We could not verify their domain with who they are trying to be.", fmt.Sprintf("(Score: %+d)", -AllChecks[4].Impact))
-		}
-	}
-	if whoTheyAreResult.ActionRequired {
-		log.Println("They have an action they want you to do:", whoTheyAreResult.Action)
-	} else {
-		log.Println("They do not want you to do anything.")
-	}
-	log.Println("This is a short summary of the email:", whoTheyAreResult.SummaryOfEmail)
-
-	if whoTheyAreResult.Realistic {
-		finalScoreNormal += AllChecks[5].Impact // RealismCheck
-		log.Println("Gemini believes the email is realistic", fmt.Sprintf("(Score: %+d)", AllChecks[5].Impact))
-	} else {
-		finalScoreNormal -= AllChecks[5].Impact // RealismCheck
-		log.Println("Gemini believes the email is not realistic", fmt.Sprintf("(Score: %+d)", -AllChecks[5].Impact))
-	}
-
-	log.Println("The reason for this is:", whoTheyAreResult.RealisticReason)
-
-	log.Println("------------ NOW IT IS CHECKING A RENDERED VERSION OF THE EMAIL -----------")
-	// Render the email HTML in a headless browser and take a screenshot
+	// --- Rendered (HTML) Analysis ---
 	RenderEmailHTML()
-
-	whoTheyAreResult, err = whoTheyAre(false)
+	whoTheyAreResultRendered, err := whoTheyAre(false)
 	if err != nil {
-		log.Fatal(err.Error())
+		//log.Fatal(err.Error())
+		// TODO handle error gracefully
 	}
-	if whoTheyAreResult.CompanyFound {
-		finalScoreRendered += AllChecks[3].Impact // CompanyIdentified
-		log.Println("Gemini identified them as", whoTheyAreResult.CompanyName, fmt.Sprintf("(Score: %+d)", AllChecks[3].Impact))
+	// Populate rendered analysis results
+	populateContentAnalysis(&finalResult.RenderedAnalysis, &finalScoreRendered, whoTheyAreResultRendered, db)
 
-	} else {
-		finalScoreRendered -= AllChecks[3].Impact // CompanyIdentified
-		log.Println("Gemini could not identify them, but they are likely a scammer", fmt.Sprintf("(Score: %+d)", -AllChecks[3].Impact))
-	}
-	if whoTheyAreResult.CompanyFound {
-		Verified, err2 := verifyCompany(db, whoTheyAreResult)
-		if err2 != nil {
-			log.Fatal(err2.Error())
-			return
-		}
-		if Verified {
-			finalScoreRendered += AllChecks[4].Impact // CompanyVerified
-			log.Println("We could verify their domain with who they are trying to be", fmt.Sprintf("(Score: %+d)", AllChecks[4].Impact))
-		} else {
-			finalScoreRendered -= AllChecks[4].Impact
-			log.Println("We could not verify their domain with who they are trying to be.", fmt.Sprintf("(Score: %+d)", -AllChecks[4].Impact))
-		}
-	}
-	if whoTheyAreResult.ActionRequired {
-		log.Println("They have an action they want you to do:", whoTheyAreResult.Action)
-	} else {
-		log.Println("They do not want you to do anything.")
-	}
-	log.Println("This is a short summary of the email:", whoTheyAreResult.SummaryOfEmail)
-
-	if whoTheyAreResult.Realistic {
-		finalScoreRendered += AllChecks[5].Impact // RealismCheck
-		log.Println("Gemini believes the email is realistic", fmt.Sprintf("(Score: %+d)", AllChecks[5].Impact))
-	} else {
-		finalScoreRendered -= AllChecks[5].Impact // RealismCheck
-		log.Println("Gemini believes the email is not realistic", fmt.Sprintf("(Score: %+d)", -AllChecks[5].Impact))
-	}
-
-	log.Println("The reason for this is:", whoTheyAreResult.RealisticReason)
-
-	log.Println("Final score normal:", finalScoreNormal+baseScore)
-	log.Println("Final score rendered:", finalScoreRendered+baseScore)
-
+	// --- Final Scoring ---
+	finalResult.Scores.BaseScore = baseScore
+	finalResult.Scores.FinalScoreNormal = finalScoreNormal + baseScore
+	finalResult.Scores.FinalScoreRendered = finalScoreRendered + baseScore
 	maxScoreVal := MaxScore()
-	normalPercentage := (float64(finalScoreNormal+baseScore) / maxScoreVal) * 100
-	renderedPercentage := (float64(finalScoreRendered+baseScore) / maxScoreVal) * 100
+	finalResult.Scores.MaxPossibleScore = maxScoreVal
+	finalResult.Scores.NormalPercentage = (float64(finalResult.Scores.FinalScoreNormal) / float64(maxScoreVal)) * 100
+	finalResult.Scores.RenderedPercentage = (float64(finalResult.Scores.FinalScoreRendered) / float64(maxScoreVal)) * 100
 
-	log.Printf("normal Percentage of how real: %.2f%%", normalPercentage)
-	log.Printf("rendered Percentage of how real: %.2f%%", renderedPercentage)
+	// --- Output JSON ---
+	jsonOutput, err := json.MarshalIndent(finalResult, "", "  ")
+	if err != nil {
+		//log.Fatalf("Error marshalling JSON: %v", err)
+		// TODO handle error gracefully
+	}
+	fmt.Println(string(jsonOutput))
+}
+
+// Helper function to populate content analysis sections to reduce code duplication
+func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResult EmailAnalysis, db *sql.DB) {
+	result.CompanyIdentified = whoResult.CompanyFound
+	result.CompanyName = whoResult.CompanyName
+	if whoResult.CompanyFound {
+		*score += AllChecks[3].Impact
+	} else {
+		*score -= AllChecks[3].Impact
+	}
+
+	if whoResult.CompanyFound {
+		verified, err := verifyCompany(db, whoResult)
+		if err != nil {
+			//log.Fatal(err.Error())
+			// TODO handle error gracefully
+		}
+		result.CompanyVerification.Verified = verified
+		if verified {
+			*score += AllChecks[4].Impact
+			result.CompanyVerification.ScoreImpact = AllChecks[4].Impact
+			result.CompanyVerification.Message = "The sender's domain aligns with the company they claim to be."
+		} else {
+			*score -= AllChecks[4].Impact
+			result.CompanyVerification.ScoreImpact = -AllChecks[4].Impact
+			result.CompanyVerification.Message = "Could not verify the sender's domain against the identified company."
+		}
+	}
+
+	result.ActionAnalysis.ActionRequired = whoResult.ActionRequired
+	result.ActionAnalysis.Action = whoResult.Action
+	result.Summary = whoResult.SummaryOfEmail
+
+	result.RealismAnalysis.IsRealistic = whoResult.Realistic
+	result.RealismAnalysis.Reason = whoResult.RealisticReason
+	if whoResult.Realistic {
+		*score += AllChecks[5].Impact
+		result.RealismAnalysis.ScoreImpact = AllChecks[5].Impact
+	} else {
+		*score -= AllChecks[5].Impact
+		result.RealismAnalysis.ScoreImpact = -AllChecks[5].Impact
+	}
 }

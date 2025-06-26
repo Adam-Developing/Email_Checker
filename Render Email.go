@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -38,18 +37,21 @@ func RenderEmailHTML() {
 	// Create a temporary HTML file to render
 	tempDir, err := os.MkdirTemp("", "email-render")
 	if err != nil {
-		log.Fatalf("Failed to create temp directory: %v", err)
+		//log.Fatalf("Failed to create temp directory: %v", err)
+		// TODO handle error gracefully
 	}
 	defer func(path string) {
 		err := os.RemoveAll(path)
 		if err != nil {
-			log.Printf("Failed to remove temp directory: %v", err)
+			//log.Printf("Failed to remove temp directory: %v", err)
+			// TODO handle error gracefully
 		}
 	}(tempDir)
 
 	tempFile := filepath.Join(tempDir, "email.html")
 	if err := os.WriteFile(tempFile, []byte(Email.HTML), 0644); err != nil {
-		log.Fatalf("Failed to write temp file: %v", err)
+		//log.Fatalf("Failed to write temp file: %v", err)
+		// TODO handle error gracefully
 	}
 
 	// Convert to file URL - ensure proper format for Windows
@@ -64,12 +66,14 @@ func RenderEmailHTML() {
 		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.FullScreenshot(&buf, 100),
 	); err != nil {
-		log.Fatalf("Failed to capture screenshot: %v", err)
+		//log.Fatalf("Failed to capture screenshot: %v", err)
+		// TODO handle error gracefully
 	}
 
 	// Create screenshots directory if it doesn't exist
 	if err := os.MkdirAll("screenshots", 0755); err != nil {
-		log.Fatalf("Failed to create screenshots directory: %v", err)
+		//log.Fatalf("Failed to create screenshots directory: %v", err)
+		// TODO handle error gracefully
 	}
 
 	// Generate a filename based on the original email filename
@@ -78,8 +82,10 @@ func RenderEmailHTML() {
 
 	// Save the screenshot
 	if err := os.WriteFile(screenshotFile, buf, 0644); err != nil {
-		log.Fatalf("Failed to save screenshot: %v", err)
+		//log.Fatalf("Failed to save screenshot: %v", err)
+		// TODO handle error gracefully
 	}
 
-	log.Printf("Screenshot saved to %s", screenshotFile)
+	//log.Printf("Screenshot saved to %s", screenshotFile)
+	// TODO handle success gracefully
 }

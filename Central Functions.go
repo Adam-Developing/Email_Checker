@@ -15,7 +15,6 @@ import (
 	"golang.org/x/net/publicsuffix"
 	"google.golang.org/genai"
 	"io"
-	"log"
 	"math"
 	"mime"
 	"mime/quotedprintable"
@@ -174,18 +173,21 @@ func imgSrcs(htmlStr string) []string {
 func parseEmail() {
 	f, err := os.Open(fileName)
 	if err != nil {
-		log.Fatal(err)
+		//log.Fatal(err)
+		// TODO handle error gracefully
 	}
 	defer func(f *os.File) {
 		err := f.Close()
 		if err != nil {
-			log.Fatal(err)
+			//log.Fatal(err)
+			// TODO handle error gracefully
 		}
 	}(f)
 
 	env, err := enmime.ReadEnvelope(f)
 	if err != nil {
-		log.Fatal(err)
+		//log.Fatal(err)
+		// TODO handle error gracefully
 	}
 
 	Email.Subject = env.GetHeader("Subject")
@@ -199,7 +201,8 @@ func parseEmail() {
 	txt, err := html2text.FromString(Email.HTML, html2text.Options{PrettyTables: false})
 
 	if err != nil {
-		log.Fatal(err)
+		//log.Fatal(err)
+		// TODO handle error gracefully
 	}
 
 	Email.Text = txt
@@ -208,7 +211,8 @@ func parseEmail() {
 		fileName,
 		strings.Replace(fileName, ".eml", "-clean.eml", 1),
 		Email.Text, Email.HTML); err != nil {
-		log.Fatal(err)
+		//log.Fatal(err)
+		// TODO handle error gracefully
 	}
 	fileName = strings.Replace(fileName, ".eml", "-clean.eml", 1)
 
@@ -295,7 +299,8 @@ func parseEmail() {
 					fn := fmt.Sprintf("cssbg-%d%s", i, ext)
 					err := os.WriteFile(filepath.Join("attachments", fn), data, 0o644)
 					if err != nil {
-						log.Fatal(err)
+						//log.Fatal(err)
+						// TODO handle error gracefully
 						return
 					}
 				}
@@ -329,7 +334,8 @@ func saveRemoteImage(src string, i int) {
 	var err error
 	u, err := url.Parse(src)
 	if err != nil {
-		log.Println("Invalid URL:", err)
+		//log.Println("Invalid URL:", err)
+		// TODO handle error gracefully
 		return
 	}
 
@@ -337,7 +343,8 @@ func saveRemoteImage(src string, i int) {
 	client := newClientWithDefaultHeaders()
 	req, err := http.NewRequest("GET", src, nil)
 	if err != nil {
-		log.Println("Failed to create request:", err)
+		//log.Println("Failed to create request:", err)
+		// TODO handle error gracefully
 		return
 	}
 
@@ -346,7 +353,8 @@ func saveRemoteImage(src string, i int) {
 		if resp != nil {
 			err := resp.Body.Close()
 			if err != nil {
-				log.Fatal(err.Error())
+				//log.Fatal(err.Error())
+				// TODO handle error gracefully
 				return
 			}
 		}
@@ -355,7 +363,8 @@ func saveRemoteImage(src string, i int) {
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
-			log.Fatal(err.Error())
+			//log.Fatal(err.Error())
+			// TODO handle error gracefully
 		}
 	}(resp.Body)
 
@@ -376,7 +385,8 @@ func saveRemoteImage(src string, i int) {
 	}
 
 	if err := os.WriteFile(filepath.Join("attachments", name), data, 0o644); err != nil {
-		log.Println("Failed to save remote image:", err)
+		//log.Println("Failed to save remote image:", err)
+		// TODO handle error gracefully
 	}
 }
 
@@ -431,7 +441,8 @@ func checkDomainReal(db *sql.DB, domainReal string) (int, string, error) {
 	defer func(rows *sql.Rows) {
 		err := rows.Close()
 		if err != nil {
-			log.Fatal(err)
+			//log.Fatal(err)
+			// TODO handle error gracefully
 		}
 	}(rows)
 
@@ -466,9 +477,7 @@ func whoTheyAre(initial bool) (EmailAnalysis, error) {
 	if err != nil {
 		return EmailAnalysis{}, err
 	}
-	if err != nil {
-		return EmailAnalysis{}, err
-	}
+
 	var prompt string
 	if initial {
 		// Build prompt
@@ -555,8 +564,8 @@ func whoTheyAre(initial bool) (EmailAnalysis, error) {
 	jsonOut := strings.TrimSpace(res.Text())
 	var result EmailAnalysis
 	if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
-		log.Fatal("Error parsing JSON:", err)
-
+		//log.Fatal("Error parsing JSON:", err)
+		// TODO handle error gracefully
 		return EmailAnalysis{}, err
 	}
 
@@ -572,7 +581,8 @@ func verifyCompany(db *sql.DB, whoTheyAreResult EmailAnalysis) (bool, error) {
 	defer func(q *sql.Rows) {
 		err := q.Close()
 		if err != nil {
-			log.Fatal(err)
+			//log.Fatal(err)
+			// TODO handle error gracefully
 		}
 	}(q)
 	for q.Next() {
