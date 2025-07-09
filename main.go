@@ -2,10 +2,12 @@ package main
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	_ "github.com/glebarez/sqlite" // pure Go, no cgo needed
 	"github.com/joho/godotenv"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -105,8 +107,79 @@ var (
 )
 
 // --- Main Application Logic ---
-
 func main() {
+	// Wrap your existing handler with the CORS middleware
+	http.Handle("/process-eml", enableCORS(http.HandlerFunc(runEmailHandler)))
+
+	// Define the port to listen on
+	port := "8080"
+	log.Printf("Starting server on port %s...\n", port)
+
+	// Start the web server
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Fatalf("Error starting server: %s\n", err)
+	}
+}
+
+// New CORS middleware function
+func enableCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set headers to allow cross-origin requests
+		w.Header().Set("Access-Control-Allow-Origin", "*") // Allow any origin
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+
+		// If it's a preflight (OPTIONS) request, we can just send the headers and exit.
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		// Otherwise, serve the next handler
+		next.ServeHTTP(w, r)
+	})
+}
+func runEmailHandler(w http.ResponseWriter, r *http.Request) {
+
+	log.Println("Handling request...")
+	// 1. Only allow POST requests
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read the Base64 encoded data from the request body
+	base64Data, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Error reading request body", http.StatusInternalServerError)
+		return
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Printf("Error closing request body: %v", err)
+			http.Error(w, "Error closing request body", http.StatusInternalServerError)
+		}
+	}(r.Body)
+
+	// **FIX**: Decode the Base64 data to get the raw EML content
+	emlData, err := base64.StdEncoding.DecodeString(string(base64Data))
+	if err != nil {
+		log.Printf("Error decoding base64 data: %v", err)
+		http.Error(w, "Error decoding base64 data from client", http.StatusBadRequest)
+		return
+	}
+
+	// Write the *decoded* EML data to a temporary file
+	//tempFileName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), fileName) //TODO Uncomment this line in production and fix the file name
+	if err := os.WriteFile(fileName, emlData, 0644); err != nil {
+		log.Printf("Error writing temp eml file: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Clean up the temporary file when done
+	//defer os.Remove(tempFileName) //TODO Uncomment this line in production
+
 	// Initialize the final result structure
 	finalResult := FinalResult{
 		EmailFile: fileName,
@@ -119,7 +192,7 @@ func main() {
 	_ = os.Mkdir("attachments", 0o755)
 
 	// Parse the email file
-	parseEmail()
+	env := parseEmail() // Capture the result here
 	finalResult.SuspectDomain = Email.Domain
 	finalResult.SuspectSubdomain = Email.subDomain
 
@@ -138,7 +211,7 @@ func main() {
 	// --- Domain Analysis ---
 	DomainReal, domain, err := checkDomainReal(db, Email.Domain)
 	if err != nil {
-		//log.Fatal(err.Error())
+		log.Fatal(err.Error())
 		// TODO handle error gracefully
 	}
 
@@ -164,17 +237,17 @@ func main() {
 	// --- Normal (Text) Analysis ---
 	whoTheyAreResultNormal, err := whoTheyAre(true)
 	if err != nil {
-		//log.Fatal(err.Error())
+		log.Fatal(err.Error())
 		// TODO handle error gracefully
 	}
 	// Populate text analysis results
 	populateContentAnalysis(&finalResult.TextAnalysis, &finalScoreNormal, whoTheyAreResultNormal, db)
 
 	// --- Rendered (HTML) Analysis ---
-	RenderEmailHTML()
+	RenderEmailHTML(env)
 	whoTheyAreResultRendered, err := whoTheyAre(false)
 	if err != nil {
-		//log.Fatal(err.Error())
+		log.Fatal(err.Error())
 		// TODO handle error gracefully
 	}
 	// Populate rendered analysis results
@@ -190,12 +263,20 @@ func main() {
 	finalResult.Scores.RenderedPercentage = (float64(finalResult.Scores.FinalScoreRendered) / float64(maxScoreVal)) * 100
 
 	// --- Output JSON ---
-	jsonOutput, err := json.MarshalIndent(finalResult, "", "  ")
+	_, err = json.MarshalIndent(finalResult, "", "  ")
 	if err != nil {
-		//log.Fatalf("Error marshalling JSON: %v", err)
+		log.Fatalf("Error marshalling JSON: %v", err)
 		// TODO handle error gracefully
 	}
-	fmt.Println(string(jsonOutput))
+	//fmt.Println(string(jsonOutput))
+	// 4. Send the structured output back as a JSON response
+	w.Header().Set("Content-Type", "application/json")
+
+	err = json.NewEncoder(w).Encode(finalResult)
+	if err != nil {
+		return
+	}
+
 }
 
 // Helper function to populate content analysis sections to reduce code duplication
@@ -211,7 +292,7 @@ func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResul
 	if whoResult.CompanyFound {
 		verified, err := verifyCompany(db, whoResult)
 		if err != nil {
-			//log.Fatal(err.Error())
+			log.Fatal(err.Error())
 			// TODO handle error gracefully
 		}
 		result.CompanyVerification.Verified = verified
@@ -239,4 +320,5 @@ func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResul
 		*score -= AllChecks[5].Impact
 		result.RealismAnalysis.ScoreImpact = -AllChecks[5].Impact
 	}
+
 }

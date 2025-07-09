@@ -15,11 +15,14 @@ import (
 	"golang.org/x/net/publicsuffix"
 	"google.golang.org/genai"
 	"io"
+	"log"
 	"math"
 	"mime"
+	"mime/multipart"
 	"mime/quotedprintable"
 	"net/http"
 	"net/mail"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path"
@@ -27,7 +30,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 )
 
 var Email struct {
@@ -90,58 +92,122 @@ func cutHTML(src string) string {
 
 	return src
 }
-func updateEML(in, out, newPlain, newHTML string) error {
-	// ----- read original headers -----
-	r, err := os.Open(in)
-	if err != nil {
-		return err
-	}
-	msg, err := mail.ReadMessage(r)
-	err = r.Close()
-	if err != nil {
-		return err
-	}
-	// ----- craft a fresh multipart/alternative -----
-	boundary := "=_clean_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+
+// updateEMLUniversal correctly rebuilds any email, preserving its structure and attachments,
+// while replacing the plain text and HTML content.
+func updateEMLUniversal(outPath string, env *enmime.Envelope, newPlain, newHTML string) error {
 	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
 
-	// original (non-body) headers
-	for k, vv := range msg.Header {
-		if strings.EqualFold(k, "Content-Type") {
-			continue // we replace it
+	// --- Step 1: Gather all non-body parts ---
+	inlines := env.Inlines
+	attachments := env.Attachments
+	otherParts := env.OtherParts
+	allAttachments := append(attachments, otherParts...)
+
+	// --- Step 2: Determine the correct top-level Content-Type ---
+	var topLevelContentType string
+	if len(inlines) > 0 {
+		topLevelContentType = "multipart/related"
+	} else if len(allAttachments) > 0 {
+		topLevelContentType = "multipart/mixed"
+	} else if newHTML != "" {
+		topLevelContentType = "multipart/alternative"
+	} else {
+		topLevelContentType = "text/plain"
+	}
+
+	// --- Step 3: Write the main email headers ---
+	_, _ = fmt.Fprintf(&buf, "From: %s\r\n", env.GetHeader("From"))
+	_, _ = fmt.Fprintf(&buf, "To: %s\r\n", env.GetHeader("To"))
+	_, _ = fmt.Fprintf(&buf, "Subject: %s\r\n", env.GetHeader("Subject"))
+	_, _ = fmt.Fprintf(&buf, "Date: %s\r\n", env.GetHeader("Date"))
+	_, _ = fmt.Fprintf(&buf, "MIME-Version: 1.0\r\n")
+
+	if !strings.HasPrefix(topLevelContentType, "multipart/") {
+		_, _ = fmt.Fprintf(&buf, "Content-Type: text/plain; charset=utf-8\r\n")
+		_, _ = fmt.Fprintf(&buf, "Content-Transfer-Encoding: quoted-printable\r\n\r\n")
+		qp := quotedprintable.NewWriter(&buf)
+		_, _ = qp.Write([]byte(newPlain))
+		_ = qp.Close()
+		return os.WriteFile(outPath, buf.Bytes(), 0o644)
+	}
+
+	_, _ = fmt.Fprintf(&buf, "Content-Type: %s; boundary=\"%s\"\r\n\r\n", topLevelContentType, writer.Boundary())
+
+	// --- Step 4: Create the body part ---
+	if len(inlines) > 0 || len(allAttachments) > 0 {
+		bodyBuf := &bytes.Buffer{}
+		nestedWriter := multipart.NewWriter(bodyBuf)
+		h := make(textproto.MIMEHeader)
+		h.Set("Content-Type", "text/plain; charset=utf-8")
+		h.Set("Content-Transfer-Encoding", "quoted-printable")
+		part, _ := nestedWriter.CreatePart(h)
+		qp := quotedprintable.NewWriter(part)
+		_, _ = qp.Write([]byte(newPlain))
+		_ = qp.Close()
+		if newHTML != "" {
+			h.Set("Content-Type", "text/html; charset=utf-8")
+			part, _ = nestedWriter.CreatePart(h)
+			qp = quotedprintable.NewWriter(part)
+			_, _ = qp.Write([]byte(newHTML))
+			_ = qp.Close()
 		}
-		for _, v := range vv {
-			_, _ = fmt.Fprintf(&buf, "%s: %s\r\n", k, v)
-
+		err := nestedWriter.Close()
+		if err != nil {
+			log.Fatal("Error closing nested writer:", err)
+			return err
+		}
+		h.Set("Content-Type", "multipart/alternative; boundary=\""+nestedWriter.Boundary()+"\"")
+		part, _ = writer.CreatePart(h)
+		_, _ = part.Write(bodyBuf.Bytes())
+	} else {
+		h := make(textproto.MIMEHeader)
+		h.Set("Content-Type", "text/plain; charset=utf-8")
+		h.Set("Content-Transfer-Encoding", "quoted-printable")
+		part, _ := writer.CreatePart(h)
+		qp := quotedprintable.NewWriter(part)
+		_, _ = qp.Write([]byte(newPlain))
+		_ = qp.Close()
+		if newHTML != "" {
+			h.Set("Content-Type", "text/html; charset=utf-8")
+			part, _ = writer.CreatePart(h)
+			qp = quotedprintable.NewWriter(part)
+			_, _ = qp.Write([]byte(newHTML))
+			_ = qp.Close()
 		}
 	}
-	_, _ = fmt.Fprintf(&buf,
-		"Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", boundary)
 
-	// plain text part (quoted-printable)
-	_, _ = fmt.Fprintf(&buf, "--%s\r\n", boundary)
-	_, _ = fmt.Fprint(&buf, "Content-Type: text/plain; charset=utf-8\r\n")
-	_, _ = fmt.Fprint(&buf, "Content-Transfer-Encoding: quoted-printable\r\n\r\n")
-	qp := quotedprintable.NewWriter(&buf)
-	_, _ = qp.Write([]byte(newPlain))
-	_ = qp.Close()
-	buf.WriteString("\r\n")
+	// --- Step 5: Copy all original attachments and inline parts ---
+	allOtherParts := append(inlines, allAttachments...)
+	for _, p := range allOtherParts {
+		partHeader := make(textproto.MIMEHeader)
+		for key, value := range p.Header {
 
-	// HTML part (quoted-printable)
-	_, _ = fmt.Fprintf(&buf, "--%s\r\n", boundary)
-	_, _ = fmt.Fprint(&buf, "Content-Type: text/html; charset=utf-8\r\n")
-	_, _ = fmt.Fprint(&buf, "Content-Transfer-Encoding: quoted-printable\r\n\r\n")
-	qp = quotedprintable.NewWriter(&buf)
-	_, _ = qp.Write([]byte(newHTML))
-	_ = qp.Close()
-	buf.WriteString("\r\n")
+			if strings.EqualFold(key, "Content-Transfer-Encoding") {
+				continue
+			}
+			partHeader.Set(key, value[0])
+		}
+		newPart, err := writer.CreatePart(partHeader)
+		if err != nil {
+			return err
+		}
+		// Write the DECODED content. The writer will now RE-ENCODE it correctly.
+		_, err = newPart.Write(p.Content)
+		if err != nil {
+			return err
+		}
+	}
 
-	// close multipart
-	_, _ = fmt.Fprintf(&buf, "--%s--\r\n", boundary)
-
-	// ----- write back out -----
-	return os.WriteFile(out, buf.Bytes(), 0o644)
+	err := writer.Close()
+	if err != nil {
+		log.Fatal("Error closing writer:", err)
+		return err
+	}
+	return os.WriteFile(outPath, buf.Bytes(), 0o644)
 }
+
 func imgSrcs(htmlStr string) []string {
 	var list []string
 	z := html.NewTokenizer(strings.NewReader(htmlStr))
@@ -170,23 +236,23 @@ func imgSrcs(htmlStr string) []string {
 	}
 }
 
-func parseEmail() {
+func parseEmail() *enmime.Envelope {
 	f, err := os.Open(fileName)
 	if err != nil {
-		//log.Fatal(err)
+		log.Fatal(err)
 		// TODO handle error gracefully
 	}
 	defer func(f *os.File) {
 		err := f.Close()
 		if err != nil {
-			//log.Fatal(err)
+			log.Fatal(err)
 			// TODO handle error gracefully
 		}
 	}(f)
 
 	env, err := enmime.ReadEnvelope(f)
 	if err != nil {
-		//log.Fatal(err)
+		log.Fatal(err)
 		// TODO handle error gracefully
 	}
 
@@ -201,20 +267,17 @@ func parseEmail() {
 	txt, err := html2text.FromString(Email.HTML, html2text.Options{PrettyTables: false})
 
 	if err != nil {
-		//log.Fatal(err)
+		log.Fatal(err)
 		// TODO handle error gracefully
 	}
 
 	Email.Text = txt
 
-	if err := updateEML(
-		fileName,
-		strings.Replace(fileName, ".eml", "-clean.eml", 1),
-		Email.Text, Email.HTML); err != nil {
-		//log.Fatal(err)
-		// TODO handle error gracefully
+	cleanFileName := strings.Replace(fileName, ".eml", "-clean.eml", 1)
+	if err := updateEMLUniversal(cleanFileName, env, Email.Text, Email.HTML); err != nil {
+		log.Fatal(err)
 	}
-	fileName = strings.Replace(fileName, ".eml", "-clean.eml", 1)
+	fileName = cleanFileName
 
 	if addr, err := mail.ParseAddress(Email.From); err == nil {
 		_, Email.subDomain, _ = strings.Cut(strings.ToLower(addr.Address), "@")
@@ -247,8 +310,27 @@ func parseEmail() {
 	for i, p := range env.Attachments {
 		savePart(p, "attach", i)
 	}
+	for i, p := range env.OtherParts {
+		// You could name it "other" to distinguish it during debugging
+		savePart(p, "other", i)
+	}
 
 	/* ---------- save every image referenced in <img src="…"> ---------- */
+
+	// Create a map to store inline parts by their Content-ID
+	inlinePartsByCID := make(map[string]*enmime.Part)
+	allParts := append(env.Inlines, env.Attachments...)
+	allParts = append(allParts, env.OtherParts...) // Include other parts here too
+
+	for _, p := range allParts {
+		contentID := p.Header.Get("Content-ID")
+		contentID = strings.TrimPrefix(contentID, "<")
+		contentID = strings.TrimSuffix(contentID, ">")
+		if contentID != "" {
+			inlinePartsByCID[p.ContentID] = p
+		}
+	}
+
 	seen := make(map[string]struct{})
 	for i, src := range imgSrcs(Email.HTML) {
 		if _, dup := seen[src]; dup {
@@ -257,7 +339,11 @@ func parseEmail() {
 		seen[src] = struct{}{}
 		switch {
 		case strings.HasPrefix(src, "cid:"):
-			continue
+			cid := strings.TrimPrefix(src, "cid:")
+			if p, ok := inlinePartsByCID[cid]; ok {
+				// Now you have the Part for the CID image, save it
+				savePart(p, "cid-inline", i) // You might want a different prefix
+			}
 		case strings.HasPrefix(src, "data:image/"):
 			if idx := strings.Index(src, "base64,"); idx != -1 {
 				data, err := base64.StdEncoding.DecodeString(src[idx+7:])
@@ -286,7 +372,10 @@ func parseEmail() {
 		seen[src] = struct{}{}
 		switch {
 		case strings.HasPrefix(src, "cid:"):
-			continue
+			cid := strings.TrimPrefix(src, "cid:")
+			if p, ok := inlinePartsByCID[cid]; ok {
+				savePart(p, "cid-cssbg", i+1000) // You might want a different prefix
+			}
 		case strings.HasPrefix(src, "data:image/"):
 			// decode & save data URI
 			if idx := strings.Index(src, "base64,"); idx != -1 {
@@ -299,9 +388,9 @@ func parseEmail() {
 					fn := fmt.Sprintf("cssbg-%d%s", i, ext)
 					err := os.WriteFile(filepath.Join("attachments", fn), data, 0o644)
 					if err != nil {
-						//log.Fatal(err)
+						log.Fatal(err)
 						// TODO handle error gracefully
-						return
+						return env
 					}
 				}
 			}
@@ -312,6 +401,7 @@ func parseEmail() {
 			saveRemoteImage(src, i+1000)
 		}
 	}
+	return env
 
 }
 
@@ -328,13 +418,12 @@ func extractCSSBackgrounds(htmlStr string) []string {
 	return urls
 }
 
-// saveRemoteImage fetches an image from the given src URL. If it's an imgur.com link,
-// it uses the Imgur API to retrieve the direct image link before downloading.
+// saveRemoteImage fetches an image from the given src URL.
 func saveRemoteImage(src string, i int) {
 	var err error
 	u, err := url.Parse(src)
 	if err != nil {
-		//log.Println("Invalid URL:", err)
+		log.Println("Invalid URL:", err)
 		// TODO handle error gracefully
 		return
 	}
@@ -343,7 +432,7 @@ func saveRemoteImage(src string, i int) {
 	client := newClientWithDefaultHeaders()
 	req, err := http.NewRequest("GET", src, nil)
 	if err != nil {
-		//log.Println("Failed to create request:", err)
+		log.Println("Failed to create request:", err)
 		// TODO handle error gracefully
 		return
 	}
@@ -353,7 +442,7 @@ func saveRemoteImage(src string, i int) {
 		if resp != nil {
 			err := resp.Body.Close()
 			if err != nil {
-				//log.Fatal(err.Error())
+				log.Fatal(err.Error())
 				// TODO handle error gracefully
 				return
 			}
@@ -363,7 +452,7 @@ func saveRemoteImage(src string, i int) {
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
-			//log.Fatal(err.Error())
+			log.Fatal(err.Error())
 			// TODO handle error gracefully
 		}
 	}(resp.Body)
@@ -385,7 +474,7 @@ func saveRemoteImage(src string, i int) {
 	}
 
 	if err := os.WriteFile(filepath.Join("attachments", name), data, 0o644); err != nil {
-		//log.Println("Failed to save remote image:", err)
+		log.Println("Failed to save remote image:", err)
 		// TODO handle error gracefully
 	}
 }
@@ -441,7 +530,7 @@ func checkDomainReal(db *sql.DB, domainReal string) (int, string, error) {
 	defer func(rows *sql.Rows) {
 		err := rows.Close()
 		if err != nil {
-			//log.Fatal(err)
+			log.Fatal(err)
 			// TODO handle error gracefully
 		}
 	}(rows)
@@ -564,7 +653,7 @@ func whoTheyAre(initial bool) (EmailAnalysis, error) {
 	jsonOut := strings.TrimSpace(res.Text())
 	var result EmailAnalysis
 	if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
-		//log.Fatal("Error parsing JSON:", err)
+		log.Fatal("Error parsing JSON:", err)
 		// TODO handle error gracefully
 		return EmailAnalysis{}, err
 	}
@@ -581,7 +670,7 @@ func verifyCompany(db *sql.DB, whoTheyAreResult EmailAnalysis) (bool, error) {
 	defer func(q *sql.Rows) {
 		err := q.Close()
 		if err != nil {
-			//log.Fatal(err)
+			log.Fatal(err)
 			// TODO handle error gracefully
 		}
 	}(q)
