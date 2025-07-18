@@ -200,7 +200,7 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 
 	// File system setup
 	if err := os.RemoveAll("attachments"); err != nil {
-		log.Printf(err.Error())
+		log.Println(err)
 	}
 	_ = os.Mkdir("attachments", 0o755)
 
@@ -261,19 +261,19 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	// Database setup
 	db, err := sql.Open("sqlite", "wikidata_websites4.db")
 	if err != nil {
-		log.Printf(err.Error())
+		log.Println(err)
 	}
 	defer func(db *sql.DB) {
 		err := db.Close()
 		if err != nil {
-			log.Printf(err.Error())
+			log.Println(err)
 		}
 	}(db)
 
 	// --- Domain Analysis ---
 	DomainReal, domain, err := checkDomainReal(db, Email.Domain)
 	if err != nil {
-		log.Printf(err.Error())
+		log.Println(err)
 		// TODO handle error gracefully
 	}
 
@@ -299,7 +299,7 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	// --- Normal (Text) Analysis ---
 	whoTheyAreResultNormal, err := whoTheyAre(true)
 	if err != nil {
-		log.Printf(err.Error())
+		log.Println(err)
 		// TODO handle error gracefully
 	}
 	// Populate text analysis results
@@ -309,7 +309,7 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	RenderEmailHTML(env)
 	whoTheyAreResultRendered, err := whoTheyAre(false)
 	if err != nil {
-		log.Printf(err.Error())
+		log.Println(err)
 		// TODO handle error gracefully
 	}
 	// Populate rendered analysis results
