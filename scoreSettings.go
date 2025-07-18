@@ -12,17 +12,17 @@ var AllChecks = []Check{
 	{
 		Name:        "DomainExactMatch",
 		Description: "Sender domain exactly matches a known good entry",
-		Impact:      +40,
+		Impact:      +25,
 	},
 	{
 		Name:        "DomainNoSimilarity",
 		Description: "Sender domain not in database and no close matches",
-		Impact:      +40,
+		Impact:      +25,
 	},
 	{
 		Name:        "DomainImpersonation",
 		Description: "Sender domain similar to a known domain (likely impersonation)",
-		Impact:      -40,
+		Impact:      0,
 	},
 	{
 		Name:        "CompanyIdentified",
@@ -43,11 +43,21 @@ var AllChecks = []Check{
 
 // MaxScore returns the highest possible total score.
 func MaxScore() float64 {
-	maxCounter := 0
+	// The maximum score is the highest possible domain score plus all other positive checks.
+	var maxDomainScore = 0
+	var otherPositiveScores = 0
+
 	for _, c := range AllChecks {
-		if c.Impact > 0 {
-			maxCounter += c.Impact
+		// Find the highest positive impact among domain-related checks
+		if c.Name == "DomainExactMatch" || c.Name == "DomainNoSimilarity" {
+			if c.Impact > maxDomainScore {
+				maxDomainScore = c.Impact
+			}
+		} else { // Sum other positive checks
+			if c.Impact > 0 {
+				otherPositiveScores += c.Impact
+			}
 		}
 	}
-	return float64(maxCounter - 40)
+	return float64(maxDomainScore + otherPositiveScores)
 }

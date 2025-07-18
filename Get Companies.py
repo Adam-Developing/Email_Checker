@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from SPARQLWrapper import SPARQLWrapper, JSON, SPARQLExceptions
+import urllib.error
 
 ENDPOINT_URL = "https://query.wikidata.org/sparql"
 DEFAULT_MAX_RECORDS = 400_000
@@ -113,6 +114,10 @@ TYPES = {
     "Educational institution": "wd:Q2385804",
     "University": "wd:Q3918",
     "School": "wd:Q3914",
+    "secondary school": "wd:Q159334",
+    "further education college": "wd:Q21822439",
+
+
     "Hospital": "wd:Q16917",
     "Museum": "wd:Q33506",
     "Library": "wd:Q7075",
@@ -132,13 +137,13 @@ TYPES = {
     "International Bar Association": "wd:Q763532",
     "Legal Bar": "wd:Q17015569",
     "barrister": "wd:Q808967",
-
 }
 
 SCHEMA_SQL = """CREATE TABLE IF NOT EXISTS websites
 (
     item
     TEXT,
+
     item_label
     TEXT,
     website
@@ -180,7 +185,8 @@ def fetch_batch(sparql: SPARQLWrapper, type_uri: str, limit: int, offset: int) -
         try:
             raw = sparql.query().convert()
             return raw["results"]["bindings"]
-        except (SPARQLExceptions.EndPointInternalError, json.JSONDecodeError) as e:
+        # Catch the HTTPError along with the others
+        except (SPARQLExceptions.EndPointInternalError, json.JSONDecodeError, urllib.error.HTTPError) as e:
             wait = BACKOFF_BASE * (2 ** (attempt - 1))
             logging.warning(
                 "Attempt %s/%s failed for offset %s (limit %s): %s – waiting %ss",
@@ -191,7 +197,9 @@ def fetch_batch(sparql: SPARQLWrapper, type_uri: str, limit: int, offset: int) -
                 current_limit //= 2
                 logging.info("Reducing batch size to %s for retries", current_limit)
         except Exception as e:
-            logging.warning("Unexpected error (%s). Retrying …", e)
+            # Define 'wait' here to fix the UnboundLocalError
+            wait = BACKOFF_BASE * (2 ** (attempt - 1))
+            logging.warning("Unexpected error (%s). Retrying in %ss …", e, wait)
             time.sleep(wait)
     logging.error("Skipping offset %s after %s unsuccessful attempts", offset, MAX_RETRIES)
     return []

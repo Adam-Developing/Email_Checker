@@ -5,12 +5,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	_ "github.com/glebarez/sqlite" // pure Go, no cgo needed
-	"github.com/joho/godotenv"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	_ "github.com/glebarez/sqlite" // pure Go, no cgo needed
+	"github.com/joho/godotenv"
 )
 
 // --- Structs for JSON Output ---
@@ -20,6 +24,12 @@ type DomainAnalysisResult struct {
 	Message       string `json:"message"`
 	MatchedDomain string `json:"matchedDomain"`
 	ScoreImpact   int    `json:"scoreImpact"`
+}
+
+type CompanyIdentificationResult struct {
+	Identified  bool   `json:"identified"`
+	Name        string `json:"name,omitempty"`
+	ScoreImpact int    `json:"scoreImpact"`
 }
 
 type CompanyVerificationResult struct {
@@ -40,12 +50,11 @@ type RealismAnalysisResult struct {
 }
 
 type ContentAnalysisResult struct {
-	CompanyIdentified   bool                      `json:"companyIdentified"`
-	CompanyName         string                    `json:"companyName,omitempty"`
-	CompanyVerification CompanyVerificationResult `json:"companyVerification"`
-	ActionAnalysis      ActionAnalysisResult      `json:"actionAnalysis"`
-	Summary             string                    `json:"summary"`
-	RealismAnalysis     RealismAnalysisResult     `json:"realismAnalysis"`
+	CompanyIdentification CompanyIdentificationResult `json:"companyIdentification"`
+	CompanyVerification   CompanyVerificationResult   `json:"companyVerification"`
+	ActionAnalysis        ActionAnalysisResult        `json:"actionAnalysis"`
+	Summary               string                      `json:"summary"`
+	RealismAnalysis       RealismAnalysisResult       `json:"realismAnalysis"`
 }
 
 type ScoreResult struct {
@@ -69,16 +78,12 @@ type FinalResult struct {
 
 // --- Global Variables & Existing Functions ---
 
-var baseScore = 0
-var finalScoreNormal = 0
-var finalScoreRendered = 0
-
 type headerRoundTripper struct {
 	headers  http.Header
 	delegate http.RoundTripper
 }
 
-var fileName = "spam7.eml"
+var fileName = "REAL WORLD TEST.eml"
 
 func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	for k, v := range h.headers {
@@ -105,9 +110,12 @@ var (
 	googleSearchCX     string
 	mainPrompt         string
 )
+var emailPath = "TestEmails"
 
 // --- Main Application Logic ---
 func main() {
+
+	extractPhoneNumbersFromEmail()
 	// Wrap your existing handler with the CORS middleware
 	http.Handle("/process-eml", enableCORS(http.HandlerFunc(runEmailHandler)))
 
@@ -117,7 +125,7 @@ func main() {
 
 	// Start the web server
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatalf("Error starting server: %s\n", err)
+		log.Printf("Error starting server: %s\n", err)
 	}
 }
 
@@ -141,6 +149,11 @@ func enableCORS(next http.Handler) http.Handler {
 func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("Handling request...")
+
+	var baseScore = 0
+	var finalScoreNormal = 0
+	var finalScoreRendered = 0
+
 	// 1. Only allow POST requests
 	if r.Method != http.MethodPost {
 		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
@@ -170,7 +183,7 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write the *decoded* EML data to a temporary file
-	//tempFileName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), fileName) //TODO Uncomment this line in production and fix the file name
+	fileName = emailPath + "/" + fmt.Sprintf("%d_%s", time.Now().UnixNano(), fileName)
 	if err := os.WriteFile(fileName, emlData, 0644); err != nil {
 		log.Printf("Error writing temp eml file: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -187,7 +200,7 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 
 	// File system setup
 	if err := os.RemoveAll("attachments"); err != nil {
-		log.Fatal(err)
+		log.Printf(err.Error())
 	}
 	_ = os.Mkdir("attachments", 0o755)
 
@@ -195,23 +208,72 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	env := parseEmail() // Capture the result here
 	finalResult.SuspectDomain = Email.Domain
 	finalResult.SuspectSubdomain = Email.subDomain
+	// The folder containing the images to convert.
+	inputDir := "attachments"
+
+	// Check if the input directory exists.
+	if _, err := os.Stat(inputDir); os.IsNotExist(err) {
+		fmt.Printf("Error: The directory '%s' does not exist. Please create it and add your images.\n", inputDir)
+		return
+	}
+
+	// Walk through all the files in the directory.
+	err = filepath.Walk(inputDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// Skip directories.
+		if info.IsDir() {
+			return nil
+		}
+		// Get the file extension and convert it to lowercase.
+		ext := strings.ToLower(filepath.Ext(path))
+
+		// Check if the file is one of the types we want to ignore.
+		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp" {
+			fmt.Printf("Skipping file '%s' (already a supported format).\n", path)
+			return nil
+		}
+		// Attempt to convert the file.
+		if err := convertImageToJPG(path); err != nil {
+			if !strings.Contains(err.Error(), "executable file not found") {
+				fmt.Printf("An error occurred processing %s: %v\n", path, err)
+			}
+		} else {
+			err := os.Remove(path)
+			if err != nil {
+				// If deletion fails, report the error but don't fail the whole process,
+				// as the conversion itself was successful.
+				return fmt.Errorf("could not remove original file '%s': %w", path, err)
+			}
+
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		fmt.Printf("An error occurred while walking the directory: %v\n", err)
+	} else {
+		fmt.Println("\nImage conversion process finished.")
+	}
 
 	// Database setup
 	db, err := sql.Open("sqlite", "wikidata_websites4.db")
 	if err != nil {
-		log.Fatal(err)
+		log.Printf(err.Error())
 	}
 	defer func(db *sql.DB) {
 		err := db.Close()
 		if err != nil {
-			log.Fatal(err)
+			log.Printf(err.Error())
 		}
 	}(db)
 
 	// --- Domain Analysis ---
 	DomainReal, domain, err := checkDomainReal(db, Email.Domain)
 	if err != nil {
-		log.Fatal(err.Error())
+		log.Printf(err.Error())
 		// TODO handle error gracefully
 	}
 
@@ -237,21 +299,21 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	// --- Normal (Text) Analysis ---
 	whoTheyAreResultNormal, err := whoTheyAre(true)
 	if err != nil {
-		log.Fatal(err.Error())
+		log.Printf(err.Error())
 		// TODO handle error gracefully
 	}
 	// Populate text analysis results
-	populateContentAnalysis(&finalResult.TextAnalysis, &finalScoreNormal, whoTheyAreResultNormal, db)
+	populateContentAnalysis(&finalResult.TextAnalysis, &finalScoreNormal, whoTheyAreResultNormal, db, w)
 
 	// --- Rendered (HTML) Analysis ---
 	RenderEmailHTML(env)
 	whoTheyAreResultRendered, err := whoTheyAre(false)
 	if err != nil {
-		log.Fatal(err.Error())
+		log.Printf(err.Error())
 		// TODO handle error gracefully
 	}
 	// Populate rendered analysis results
-	populateContentAnalysis(&finalResult.RenderedAnalysis, &finalScoreRendered, whoTheyAreResultRendered, db)
+	populateContentAnalysis(&finalResult.RenderedAnalysis, &finalScoreRendered, whoTheyAreResultRendered, db, w)
 
 	// --- Final Scoring ---
 	finalResult.Scores.BaseScore = baseScore
@@ -265,7 +327,7 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	// --- Output JSON ---
 	_, err = json.MarshalIndent(finalResult, "", "  ")
 	if err != nil {
-		log.Fatalf("Error marshalling JSON: %v", err)
+		log.Printf("Error marshalling JSON: %v", err)
 		// TODO handle error gracefully
 	}
 	//fmt.Println(string(jsonOutput))
@@ -280,19 +342,24 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // Helper function to populate content analysis sections to reduce code duplication
-func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResult EmailAnalysis, db *sql.DB) {
-	result.CompanyIdentified = whoResult.CompanyFound
-	result.CompanyName = whoResult.CompanyName
+func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResult EmailAnalysis, db *sql.DB, w http.ResponseWriter) {
+	result.CompanyIdentification.Identified = whoResult.CompanyFound
+	result.CompanyIdentification.Name = whoResult.CompanyName
 	if whoResult.CompanyFound {
 		*score += AllChecks[3].Impact
+		result.CompanyIdentification.ScoreImpact = AllChecks[3].Impact
 	} else {
-		*score -= AllChecks[3].Impact
+		//*score -= AllChecks[3].Impact
+		//result.CompanyIdentification.ScoreImpact = -AllChecks[3].Impact
+		result.CompanyIdentification.ScoreImpact = 0
 	}
 
 	if whoResult.CompanyFound {
 		verified, err := verifyCompany(db, whoResult)
 		if err != nil {
-			log.Fatal(err.Error())
+			log.Printf("Error checking domain: %v", err)
+			http.Error(w, "Internal server error during domain analysis", http.StatusInternalServerError)
+
 			// TODO handle error gracefully
 		}
 		result.CompanyVerification.Verified = verified
@@ -301,8 +368,9 @@ func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResul
 			result.CompanyVerification.ScoreImpact = AllChecks[4].Impact
 			result.CompanyVerification.Message = "The sender's domain aligns with the company they claim to be."
 		} else {
-			*score -= AllChecks[4].Impact
-			result.CompanyVerification.ScoreImpact = -AllChecks[4].Impact
+			//*score -= AllChecks[4].Impact
+			//result.CompanyVerification.ScoreImpact = -AllChecks[4].Impact
+			//result.CompanyVerification.ScoreImpact = 0
 			result.CompanyVerification.Message = "Could not verify the sender's domain against the identified company."
 		}
 	}
@@ -317,8 +385,9 @@ func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResul
 		*score += AllChecks[5].Impact
 		result.RealismAnalysis.ScoreImpact = AllChecks[5].Impact
 	} else {
-		*score -= AllChecks[5].Impact
-		result.RealismAnalysis.ScoreImpact = -AllChecks[5].Impact
+		//*score -= AllChecks[5].Impact
+		//result.RealismAnalysis.ScoreImpact = -AllChecks[5].Impact
+		result.RealismAnalysis.ScoreImpact = 0
 	}
 
 }

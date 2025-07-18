@@ -6,14 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/jaytaylor/html2text"
-	"github.com/jhillyerd/enmime"
-	"github.com/lithammer/fuzzysearch/fuzzy"
-	"golang.org/x/net/context"
-	"golang.org/x/net/html"
-	"golang.org/x/net/idna"
-	"golang.org/x/net/publicsuffix"
-	"google.golang.org/genai"
 	"io"
 	"log"
 	"math"
@@ -25,11 +17,21 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/jaytaylor/html2text"
+	"github.com/jhillyerd/enmime"
+	"github.com/lithammer/fuzzysearch/fuzzy"
+	"golang.org/x/net/context"
+	"golang.org/x/net/html"
+	"golang.org/x/net/idna"
+	"golang.org/x/net/publicsuffix"
+	"google.golang.org/genai"
 )
 
 var Email struct {
@@ -401,7 +403,11 @@ func parseEmail() *enmime.Envelope {
 			saveRemoteImage(src, i+1000)
 		}
 	}
-	return env
+
+	New, err := os.Open(fileName)
+	envNew, err := enmime.ReadEnvelope(New)
+
+	return envNew
 
 }
 
@@ -477,6 +483,49 @@ func saveRemoteImage(src string, i int) {
 		log.Println("Failed to save remote image:", err)
 		// TODO handle error gracefully
 	}
+}
+
+// convertImageToJPG uses the ImageMagick 'magick' command-line tool to convert
+// an image to JPG. This is the modern, robust method that avoids conflicts
+// with other system tools and handles a wide variety of formats.
+
+func convertImageToJPG(inputPath string) error {
+	// Define the output path for the new JPG file.
+	dir := filepath.Dir(inputPath)
+	baseName := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+	newFileName := fmt.Sprintf("%s.jpg", baseName)
+	newFilePath := filepath.Join(dir, newFileName)
+
+	// Prevent converting a file to itself if it's already a JPG.
+	if strings.EqualFold(inputPath, newFilePath) {
+		fmt.Printf("Skipping file '%s': It is already a JPG file.\n", inputPath)
+		return nil
+	}
+
+	fmt.Printf("Converting '%s' using ImageMagick...\n", inputPath)
+
+	cmd := exec.Command("magick", inputPath, newFilePath)
+
+	// Run the command and capture any output (including errors).
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// The command failed. We check if this is because 'magick' is not installed.
+		if strings.Contains(err.Error(), "executable file not found") {
+			// Provide a clear error message if ImageMagick is not installed.
+			fmt.Println("--------------------------------------------------------------------")
+			fmt.Println("ERROR: ImageMagick 'magick' command not found.")
+			fmt.Println("Please install ImageMagick and ensure it is added to your system's PATH.")
+			fmt.Println("You can download it from: https://imagemagick.org/script/download.php")
+			fmt.Println("--------------------------------------------------------------------")
+			// We return the original error but the user will see the helpful message above.
+			return err
+		}
+		// The command was found, but it failed during the conversion process.
+		return fmt.Errorf("ImageMagick failed to convert '%s'. Error: %s", inputPath, string(output))
+	}
+
+	fmt.Printf("Successfully converted '%s' to '%s'\n", inputPath, newFilePath)
+	return nil
 }
 
 func checkDomainReal(db *sql.DB, domainReal string) (int, string, error) {
@@ -729,4 +778,29 @@ func extractDomain(rawURL string) (string, error) {
 		host = strings.TrimPrefix(host, "www.")
 	}
 	return host, nil
+}
+
+// extractPhoneNumbersFromEmail extracts all phone numbers from Email.Text and Email.HTML and returns them as a slice of strings.
+func extractPhoneNumbersFromEmail() []string {
+	// Define a regex pattern for phone numbers (international and local formats)
+	// This pattern matches numbers like: +1 234-567-8900, (123) 456-7890, 123-456-7890, 1234567890, etc.
+	phonePattern := regexp.MustCompile(`(?i)(?:\+\d{1,3}[\s-]?)?(?:\(\d{2,4}\)[\s-]?|\d{2,4}[\s-]?)?\d{3,4}[\s-]?\d{3,4}`)
+
+	// Combine text and HTML (in case some numbers are only in one)
+	combined := Email.Text + "\n" + Email.HTML
+
+	matches := phonePattern.FindAllString(combined, -1)
+	unique := make(map[string]struct{})
+	var result []string
+	for _, m := range matches {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		if _, exists := unique[m]; !exists {
+			unique[m] = struct{}{}
+			result = append(result, m)
+		}
+	}
+	return result
 }
