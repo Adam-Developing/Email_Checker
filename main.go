@@ -49,12 +49,24 @@ type RealismAnalysisResult struct {
 	ScoreImpact int    `json:"scoreImpact"`
 }
 
+// PhoneNumberValidation holds a single phone number and its validation status.
+type PhoneNumbersValidation struct {
+	PhoneNumber string `json:"phoneNumber"`
+	IsValid     bool   `json:"isValid"`
+}
+
+// ContactMethodResult has been updated to include a list of phone number validation results.
+type ContactMethodResult struct {
+	PhoneNumbers []PhoneNumbersValidation `json:"phoneNumbers"`
+	ScoreImpact  int                      `json:"scoreImpact"`
+}
 type ContentAnalysisResult struct {
 	CompanyIdentification CompanyIdentificationResult `json:"companyIdentification"`
 	CompanyVerification   CompanyVerificationResult   `json:"companyVerification"`
 	ActionAnalysis        ActionAnalysisResult        `json:"actionAnalysis"`
 	Summary               string                      `json:"summary"`
 	RealismAnalysis       RealismAnalysisResult       `json:"realismAnalysis"`
+	ContactMethodAnalysis ContactMethodResult         `json:"contactMethodAnalysis"`
 }
 
 type ScoreResult struct {
@@ -82,8 +94,6 @@ type headerRoundTripper struct {
 	headers  http.Header
 	delegate http.RoundTripper
 }
-
-var fileName = "REAL WORLD TEST.eml"
 
 func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	for k, v := range h.headers {
@@ -114,8 +124,6 @@ var emailPath = "TestEmails"
 
 // --- Main Application Logic ---
 func main() {
-
-	extractPhoneNumbersFromEmail()
 	// Wrap your existing handler with the CORS middleware
 	http.Handle("/process-eml", enableCORS(http.HandlerFunc(runEmailHandler)))
 
@@ -181,9 +189,8 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error decoding base64 data from client", http.StatusBadRequest)
 		return
 	}
-
 	// Write the *decoded* EML data to a temporary file
-	fileName = emailPath + "/" + fmt.Sprintf("%d_%s", time.Now().UnixNano(), fileName)
+	fileName := emailPath + "/" + fmt.Sprintf("%d_%s", time.Now().UnixNano(), "REAL WORLD TEST.eml")
 	if err := os.WriteFile(fileName, emlData, 0644); err != nil {
 		log.Printf("Error writing temp eml file: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -205,7 +212,7 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	_ = os.Mkdir("attachments", 0o755)
 
 	// Parse the email file
-	env := parseEmail() // Capture the result here
+	env := parseEmail(fileName) // Capture the result here
 	finalResult.SuspectDomain = Email.Domain
 	finalResult.SuspectSubdomain = Email.subDomain
 	// The folder containing the images to convert.
@@ -297,17 +304,158 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- Normal (Text) Analysis ---
-	whoTheyAreResultNormal, err := whoTheyAre(true)
+	whoTheyAreResultNormal, err := whoTheyAre(true, fileName)
 	if err != nil {
 		log.Println(err)
 		// TODO handle error gracefully
+	}
+	bannedWords := []string{"scam", "fraud", "warning"}
+
+	// Initialise the slice in the final result.
+	finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers = []PhoneNumbersValidation{}
+	var scoreImpactApplied bool // This flag tracks if we've already applied the score.
+
+	phoneNumbersText := extractPhoneNumbersFromEmail(Email.Text + "\n" + Email.HTML)
+
+	// Handle the case where no phone numbers are found in the email.
+	if len(phoneNumbersText) == 0 {
+		log.Println("No phone numbers found in the email.")
+		// Apply the score impact as per the original logic for no-numbers case.
+		finalResult.TextAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
+		finalScoreNormal += AllChecks[6].Impact
+	} else {
+		// If phone numbers are found, iterate through each one.
+		for _, phoneNumber := range phoneNumbersText {
+			isValid := false // Assume the number is not valid by default.
+
+			// The validation logic from your original code is preserved here.
+			body, err := searchGoogle(phoneNumber)
+			if err != nil {
+				log.Printf("Error searching Google for phone number %s: %v", phoneNumber, err)
+				// Add the number as invalid and continue to the next.
+				finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers = append(
+					finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers,
+					PhoneNumbersValidation{PhoneNumber: phoneNumber, IsValid: false},
+				)
+				continue
+			}
+
+			if string(body) != "" {
+				var sr GoogleSearchResult
+				if err := json.Unmarshal(body, &sr); err == nil && len(sr.Items) > 0 {
+					DisplayLink := strings.ToLower(sr.Items[0].DisplayLink)
+					body, err := searchGoogle(DisplayLink)
+					if err == nil && string(body) != "" {
+						var sr2 GoogleSearchResult
+						if err := json.Unmarshal(body, &sr2); err == nil && len(sr2.Items) > 0 {
+							companyTitle := strings.ToLower(sr2.Items[0].Title)
+
+							// Check if the company name matches and is not a banned word.
+							if strings.Contains(companyTitle, strings.ToLower(whoTheyAreResultNormal.CompanyName)) && !containsAny(companyTitle, bannedWords) {
+								log.Printf("Found a valid match for '%s' in search results for phone number %s.", whoTheyAreResultNormal.CompanyName, phoneNumber)
+								isValid = true // Mark this number as valid.
+
+								// CRITICAL: Only apply score impact if it hasn't been applied yet.
+								if !scoreImpactApplied {
+									finalResult.TextAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
+									finalScoreNormal += AllChecks[6].Impact
+									scoreImpactApplied = true // Set the flag to prevent future score changes.
+								}
+							}
+						}
+					}
+				}
+			}
+
+			if !isValid {
+				log.Printf("No valid match found for phone number %s.", phoneNumber)
+			}
+
+			// Add the result for the current phone number to the final list.
+			finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers = append(
+				finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers,
+				PhoneNumbersValidation{PhoneNumber: phoneNumber, IsValid: isValid},
+			)
+		}
 	}
 	// Populate text analysis results
 	populateContentAnalysis(&finalResult.TextAnalysis, &finalScoreNormal, whoTheyAreResultNormal, db, w)
 
 	// --- Rendered (HTML) Analysis ---
-	RenderEmailHTML(env)
-	whoTheyAreResultRendered, err := whoTheyAre(false)
+	fileNameImage := RenderEmailHTML(env, fileName)
+	renderEmailText := OCRImage(fileNameImage)
+
+	if renderEmailText == "" {
+		log.Println("No text extracted from the rendered email.")
+	} else {
+		phoneNumbersRendered := extractPhoneNumbersFromEmail(renderEmailText)
+		// Initialise the slice in the final result.
+		finalResult.RenderedAnalysis.ContactMethodAnalysis.PhoneNumbers = []PhoneNumbersValidation{}
+		var scoreImpactApplied bool // This flag tracks if we've already applied the score.
+
+		// Handle the case where no phone numbers are found in the email.
+		if len(phoneNumbersRendered) == 0 {
+			log.Println("No phone numbers found in the email.")
+			// Apply the score impact as per the original logic for no-numbers case.
+			finalResult.TextAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
+			finalScoreNormal += AllChecks[6].Impact
+		} else {
+			// If phone numbers are found, iterate through each one.
+			for _, phoneNumber := range phoneNumbersRendered {
+				isValid := false // Assume the number is not valid by default.
+
+				// The validation logic from your original code is preserved here.
+				body, err := searchGoogle(phoneNumber)
+				if err != nil {
+					log.Printf("Error searching Google for phone number %s: %v", phoneNumber, err)
+					// Add the number as invalid and continue to the next.
+					finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers = append(
+						finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers,
+						PhoneNumbersValidation{PhoneNumber: phoneNumber, IsValid: false},
+					)
+					continue
+				}
+
+				if string(body) != "" {
+					var sr GoogleSearchResult
+					if err := json.Unmarshal(body, &sr); err == nil && len(sr.Items) > 0 {
+						DisplayLink := strings.ToLower(sr.Items[0].DisplayLink)
+						body, err := searchGoogle(DisplayLink)
+						if err == nil && string(body) != "" {
+							var sr2 GoogleSearchResult
+							if err := json.Unmarshal(body, &sr2); err == nil && len(sr2.Items) > 0 {
+								companyTitle := strings.ToLower(sr2.Items[0].Title)
+
+								// Check if the company name matches and is not a banned word.
+								if strings.Contains(companyTitle, strings.ToLower(whoTheyAreResultNormal.CompanyName)) && !containsAny(companyTitle, bannedWords) {
+									log.Printf("Found a valid match for '%s' in search results for phone number %s.", whoTheyAreResultNormal.CompanyName, phoneNumber)
+									isValid = true // Mark this number as valid.
+
+									// CRITICAL: Only apply score impact if it hasn't been applied yet.
+									if !scoreImpactApplied {
+										finalResult.TextAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
+										finalScoreNormal += AllChecks[6].Impact
+										scoreImpactApplied = true // Set the flag to prevent future score changes.
+									}
+								}
+							}
+						}
+					}
+				}
+
+				if !isValid {
+					log.Printf("No valid match found for phone number %s.", phoneNumber)
+				}
+
+				// Add the result for the current phone number to the final list.
+				finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers = append(
+					finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers,
+					PhoneNumbersValidation{PhoneNumber: phoneNumber, IsValid: isValid},
+				)
+			}
+		}
+	}
+	whoTheyAreResultRendered, err := whoTheyAre(false, fileName)
 	if err != nil {
 		log.Println(err)
 		// TODO handle error gracefully

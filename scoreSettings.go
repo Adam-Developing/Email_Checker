@@ -39,6 +39,11 @@ var AllChecks = []Check{
 		Description: "Content judged realistic (no ludicrous offers or demands)",
 		Impact:      25,
 	},
+	{
+		Name:        "CorrectPhoneNumber",
+		Description: "Phone number is valid and matches the company",
+		Impact:      25,
+	},
 }
 
 // MaxScore returns the highest possible total score.

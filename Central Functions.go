@@ -27,6 +27,7 @@ import (
 	"github.com/jaytaylor/html2text"
 	"github.com/jhillyerd/enmime"
 	"github.com/lithammer/fuzzysearch/fuzzy"
+	"github.com/nyaruka/phonenumbers"
 	"golang.org/x/net/context"
 	"golang.org/x/net/html"
 	"golang.org/x/net/idna"
@@ -71,23 +72,31 @@ type EmailAnalysis struct {
 
 type GoogleSearchResult struct {
 	Items []struct {
-		Link string `json:"link"`
+		Link        string `json:"link"`
+		Title       string `json:"title"`
+		DisplayLink string `json:"displayLink"`
 	} `json:"items"`
 }
 
-// cutHTML trims everything starting at the first giant spacer (<div height:… >)
-// or at the first run of 40 empty <p/> tags.
+// cutHTML trims everything at the first run of 40 empty <p/> or <div/> tags,
+// or at a giant fixed-height div.
 func cutHTML(src string) string {
 	lc := strings.ToLower(src)
 
-	// 1) huge fixed-height div
+	// 1) huge fixed-height div (original check)
 	if m := regexp.MustCompile(`(?i)<div[^>]*\bheight\s*:\s*(\d+)px`).FindStringSubmatchIndex(lc); len(m) == 4 {
 		if h, _ := strconv.Atoi(lc[m[2]:m[3]]); h > 3000 { // px threshold
 			return src[:m[0]]
 		}
 	}
 
-	// 2) ≥40 consecutive blank paragraphs ( , &nbsp;, nothing)
+	// 2) ≥40 consecutive blank DIVS (MODIFIED CHECK)
+	// This pattern now looks for <div> instead of <p>
+	if m := regexp.MustCompile(`(?i)(?:<div[^>]*>\s*(?:&nbsp;)?\s*</div>[\s\r\n]*){40,}`).FindStringIndex(lc); len(m) == 2 {
+		return src[:m[0]]
+	}
+
+	// This is the original check for paragraphs, which you might want to keep
 	if m := regexp.MustCompile(`(?i)(?:<p[^>]*>\s*(?:&nbsp;)?\s*</p>[\s\r\n]*){40,}`).FindStringIndex(lc); len(m) == 2 {
 		return src[:m[0]]
 	}
@@ -96,7 +105,7 @@ func cutHTML(src string) string {
 }
 
 // updateEMLUniversal correctly rebuilds any email, preserving its structure and attachments,
-// while replacing the plain text and HTML content.
+// while replacing the plain text and HTML content and ensuring images are base64 encoded.
 func updateEMLUniversal(outPath string, env *enmime.Envelope, newPlain, newHTML string) error {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
@@ -126,6 +135,7 @@ func updateEMLUniversal(outPath string, env *enmime.Envelope, newPlain, newHTML 
 	_, _ = fmt.Fprintf(&buf, "Date: %s\r\n", env.GetHeader("Date"))
 	_, _ = fmt.Fprintf(&buf, "MIME-Version: 1.0\r\n")
 
+	// Handle the simple case of a single-part plain text email
 	if !strings.HasPrefix(topLevelContentType, "multipart/") {
 		_, _ = fmt.Fprintf(&buf, "Content-Type: text/plain; charset=utf-8\r\n")
 		_, _ = fmt.Fprintf(&buf, "Content-Transfer-Encoding: quoted-printable\r\n\r\n")
@@ -138,6 +148,7 @@ func updateEMLUniversal(outPath string, env *enmime.Envelope, newPlain, newHTML 
 	_, _ = fmt.Fprintf(&buf, "Content-Type: %s; boundary=\"%s\"\r\n\r\n", topLevelContentType, writer.Boundary())
 
 	// --- Step 4: Create the body part ---
+	// This part creates a multipart/alternative section for the plain and HTML bodies.
 	if len(inlines) > 0 || len(allAttachments) > 0 {
 		bodyBuf := &bytes.Buffer{}
 		nestedWriter := multipart.NewWriter(bodyBuf)
@@ -164,6 +175,7 @@ func updateEMLUniversal(outPath string, env *enmime.Envelope, newPlain, newHTML 
 		part, _ = writer.CreatePart(h)
 		_, _ = part.Write(bodyBuf.Bytes())
 	} else {
+		// Case where there are no attachments, the alternative part is top-level.
 		h := make(textproto.MIMEHeader)
 		h.Set("Content-Type", "text/plain; charset=utf-8")
 		h.Set("Content-Transfer-Encoding", "quoted-printable")
@@ -185,18 +197,23 @@ func updateEMLUniversal(outPath string, env *enmime.Envelope, newPlain, newHTML 
 	for _, p := range allOtherParts {
 		partHeader := make(textproto.MIMEHeader)
 		for key, value := range p.Header {
-
 			if strings.EqualFold(key, "Content-Transfer-Encoding") {
 				continue
 			}
 			partHeader.Set(key, value[0])
 		}
+
+		// Check if the part is an image and force base64 encoding.
+		if strings.HasPrefix(strings.ToLower(p.Header.Get("Content-Type")), "image/") {
+			partHeader.Set("Content-Transfer-Encoding", "base64")
+		}
+
 		newPart, err := writer.CreatePart(partHeader)
 		if err != nil {
 			return err
 		}
-		// Write the DECODED content. The writer will now RE-ENCODE it correctly.
-		_, err = newPart.Write(p.Content)
+		// Write the DECODED content. The writer will re-encode it based on the header.
+		_, err = newPart.Write([]byte(base64.StdEncoding.EncodeToString(p.Content)))
 		if err != nil {
 			return err
 		}
@@ -238,7 +255,7 @@ func imgSrcs(htmlStr string) []string {
 	}
 }
 
-func parseEmail() *enmime.Envelope {
+func parseEmail(fileName string) *enmime.Envelope {
 	f, err := os.Open(fileName)
 	if err != nil {
 		log.Fatal(err)
@@ -604,8 +621,9 @@ func checkDomainReal(db *sql.DB, domainReal string) (int, string, error) {
 	return 2, ascii, nil
 }
 
-func whoTheyAre(initial bool) (EmailAnalysis, error) {
+func whoTheyAre(initial bool, fileName string) (EmailAnalysis, error) {
 	// Read raw EML
+
 	f, err := os.Open(fileName)
 	if err != nil {
 		return EmailAnalysis{}, err
@@ -732,27 +750,10 @@ func verifyCompany(db *sql.DB, whoTheyAreResult EmailAnalysis) (bool, error) {
 	}
 
 	/* ---- Google fallback ---- */
-	escaped := url.QueryEscape(whoTheyAreResult.CompanyName)
-	req, err := http.NewRequest("GET",
-		"https://www.googleapis.com/customsearch/v1?key="+googleSearchAPIKey+
-			"&cx="+googleSearchCX+
-			"&q="+escaped, nil)
+	body, err := searchGoogle(whoTheyAreResult.CompanyName + " " + Email.Domain)
 	if err != nil {
 		return false, err
 	}
-	client := newClientWithDefaultHeaders()
-	resp, err := client.Do(req)
-
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return false, err
-	}
-	body, _ := io.ReadAll(resp.Body)
-
-	err = resp.Body.Close()
-	if err != nil {
-		return false, err
-	}
-
 	var sr GoogleSearchResult
 	if err := json.Unmarshal(body, &sr); err != nil {
 		return false, err
@@ -765,6 +766,30 @@ func verifyCompany(db *sql.DB, whoTheyAreResult EmailAnalysis) (bool, error) {
 		return false, err
 	}
 	return linkDomain == Email.Domain, nil
+}
+
+func searchGoogle(searchTerm string) ([]byte, error) {
+	escaped := url.QueryEscape(searchTerm)
+	req, err := http.NewRequest("GET",
+		"https://www.googleapis.com/customsearch/v1?key="+googleSearchAPIKey+
+			"&cx="+googleSearchCX+
+			"&q="+escaped, nil)
+	if err != nil {
+		return []byte(""), err
+	}
+	client := newClientWithDefaultHeaders()
+	resp, err := client.Do(req)
+
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return []byte(""), err
+	}
+	body, _ := io.ReadAll(resp.Body)
+
+	err = resp.Body.Close()
+	if err != nil {
+		return []byte(""), err
+	}
+	return body, nil
 }
 
 // Function to extract domain from a URL
@@ -780,27 +805,91 @@ func extractDomain(rawURL string) (string, error) {
 	return host, nil
 }
 
-// extractPhoneNumbersFromEmail extracts all phone numbers from Email.Text and Email.HTML and returns them as a slice of strings.
-func extractPhoneNumbersFromEmail() []string {
-	// Define a regex pattern for phone numbers (international and local formats)
-	// This pattern matches numbers like: +1 234-567-8900, (123) 456-7890, 123-456-7890, 1234567890, etc.
-	phonePattern := regexp.MustCompile(`(?i)(?:\+\d{1,3}[\s-]?)?(?:\(\d{2,4}\)[\s-]?|\d{2,4}[\s-]?)?\d{3,4}[\s-]?\d{3,4}`)
+// extractPhoneNumbersFromEmail finds and validates all phone numbers in email content.
+func extractPhoneNumbersFromEmail(text string) []string {
+	// Step 1: Clean HTML attributes from all tags.
+	// This regex finds a tag name and its attributes.
+	tagRegex := regexp.MustCompile(`<([a-zA-Z0-9]+)([^>]*)>`)
+	// This regex finds the style attribute within the attributes string.
+	styleAttrRegex := regexp.MustCompile(`style\s*=\s*['"][^"]*['"]`)
 
-	// Combine text and HTML (in case some numbers are only in one)
-	combined := Email.Text + "\n" + Email.HTML
+	textWithAttrsCleaned := tagRegex.ReplaceAllStringFunc(text, func(tag string) string {
+		// Extract tag name (e.g., "p", "img") and attributes string.
+		matches := tagRegex.FindStringSubmatch(tag)
+		if len(matches) < 2 {
+			return tag // Should not happen, but safe fallback.
+		}
+		tagName := matches[1]
+		attrs := matches[2]
 
-	matches := phonePattern.FindAllString(combined, -1)
+		// Find the style attribute, if it exists.
+		styleAttr := styleAttrRegex.FindString(attrs)
+		// If the style attribute exists AND contains the word "content", preserve it.
+		if styleAttr != "" && strings.Contains(styleAttr, "content") {
+			return "<" + tagName + " " + styleAttr + ">"
+		}
+
+		// Otherwise, return the tag with all attributes stripped.
+		return "<" + tagName + ">"
+	})
+
+	// Step 2: Clean the CSS inside <style> blocks.
+	styleBlockRegex := regexp.MustCompile(`(?s)<style.*?</style>`)
+	contentRegex := regexp.MustCompile(`content\s*:\s*['"](.*?)['"]`)
+	textWithCssCleaned := styleBlockRegex.ReplaceAllStringFunc(textWithAttrsCleaned, func(styleBlock string) string {
+		contentMatches := contentRegex.FindAllStringSubmatch(styleBlock, -1)
+		var preservedContents []string
+		for _, match := range contentMatches {
+			if len(match) > 1 {
+				preservedContents = append(preservedContents, match[1])
+			}
+		}
+		return strings.Join(preservedContents, " ")
+	})
+
+	// Step 3: Remove hex codes.
+	hexRegex := regexp.MustCompile(`#\b[0-9a-fA-F]{3,6}\b`)
+	textWithoutHex := hexRegex.ReplaceAllString(textWithCssCleaned, " ")
+
+	// Step 4: Remove date patterns.
+	dateRegex := regexp.MustCompile(`\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})\b`)
+	textWithoutDates := dateRegex.ReplaceAllString(textWithoutHex, " ")
+
+	// Step 5: Proceed with phone number extraction.
+	phoneRegex := regexp.MustCompile(`(?:^|\s|[^a-zA-Z\d])(\+?(?:\d{2,}|\(\d{2,}\))(?:[\s\-–—]?\d{2,})+)`)
+	matches := phoneRegex.FindAllStringSubmatch(textWithoutDates, -1)
+
 	unique := make(map[string]struct{})
 	var result []string
-	for _, m := range matches {
-		m = strings.TrimSpace(m)
-		if m == "" {
-			continue
-		}
-		if _, exists := unique[m]; !exists {
-			unique[m] = struct{}{}
-			result = append(result, m)
+	regionsToTry := []string{"US", "GB", "DE", "AU", "FR", "IN"}
+
+	for _, match := range matches {
+		if len(match) > 1 {
+			candidate := match[1]
+			cleanCandidate := strings.TrimSpace(candidate)
+
+			for _, region := range regionsToTry {
+				num, err := phonenumbers.Parse(cleanCandidate, region)
+				if err == nil && phonenumbers.IsValidNumber(num) {
+					formattedNum := phonenumbers.Format(num, phonenumbers.NATIONAL)
+					if _, exists := unique[formattedNum]; !exists {
+						unique[formattedNum] = struct{}{}
+						result = append(result, formattedNum)
+					}
+					break
+				}
+			}
 		}
 	}
 	return result
+}
+
+// Helper function to check if a string contains any substring from a list
+func containsAny(s string, substrs []string) bool {
+	for _, substr := range substrs {
+		if strings.Contains(s, substr) {
+			return true // Found a banned word
+		}
+	}
+	return false // No banned words were found
 }
