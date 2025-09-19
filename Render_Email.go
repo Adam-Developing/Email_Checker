@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/chromedp/cdproto/emulation"
 	_ "io"
 	"log"
 	"mime"
@@ -13,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/chromedp/cdproto/emulation"
 
 	"github.com/chromedp/chromedp"
 	"github.com/jhillyerd/enmime"
@@ -78,6 +79,7 @@ func RenderEmailHTML(env *enmime.Envelope, fileName string) string {
 
 		chromedp.Navigate(fileURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.Sleep(1*time.Second),
 		chromedp.FullScreenshot(&buf, 100),
 	); err != nil {
 		log.Printf("Failed to capture screenshot: %v", err)
