@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jaytaylor/html2text"
 	"github.com/jhillyerd/enmime"
@@ -76,6 +77,15 @@ type GoogleSearchResult struct {
 		Title       string `json:"title"`
 		DisplayLink string `json:"displayLink"`
 	} `json:"items"`
+}
+
+// Verdict holds the processed result from a urlscan.io check
+type Verdict struct {
+	Score           int      `json:"score"`           // The raw overall score from urlscan (e.g., -100 to 100)
+	Cats            []string `json:"categories"`      // Categories like "phishing"
+	Report          string   `json:"report"`          // The human-readable report URL
+	PlatformVerdict bool     `json:"platformVerdict"` // The raw "malicious: true/false" boolean from urlscan.io
+	FinalDecision   bool     `json:"finalDecision"`   // The app's final "is this bad?" decision
 }
 
 // cutHTML trims everything at the first run of 40 empty <p/> or <div/> tags,
@@ -892,4 +902,221 @@ func containsAny(s string, substrs []string) bool {
 		}
 	}
 	return false // No banned words were found
+}
+
+func getURL(emailText string) []string {
+
+	// Compile the regular expression for finding URLs.
+	re := regexp.MustCompile(`(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s` + "`" + `!()\[\]{};:'".,<>?«»“”‘’]))`)
+
+	// Find all URLs in the given text.
+	urls := re.FindAllString(emailText, -1)
+
+	// Print the found URLs.
+	fmt.Println("Found URLs:")
+	for _, url := range urls {
+		fmt.Println(url)
+	}
+	return urls
+}
+
+func getFinalURL(ctx context.Context, start string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, start, nil)
+	if err != nil {
+		return "", err
+	}
+
+	// Use your client with default headers
+	client := newClientWithDefaultHeaders()
+	// Add a sane timeout (your helper doesn't set one)
+	client.Timeout = 15 * time.Second
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	// After redirects, this is the final URL
+	return resp.Request.URL.String(), nil
+}
+
+func checkURLs(ctx context.Context, u string) (*Verdict, error) {
+
+	if URLScanAPIKey == "" {
+		return nil, fmt.Errorf("URLSCAN_API_KEY not set")
+	}
+
+	c := newClientWithDefaultHeaders()
+	c.Timeout = 20 * time.Second
+
+	// --- 1. Search for an Existing Recent Scan First ---
+	log.Printf("Searching for existing scan of %s...", u)
+	q := url.QueryEscape(fmt.Sprintf(`page.url:"%s" AND date:>now-7d`, u))
+	searchReq, err := http.NewRequestWithContext(ctx, "GET", "https://urlscan.io/api/v1/search/?size=1&q="+q, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create search req: %w", err)
+	}
+
+	searchResp, err := c.Do(searchReq)
+	if err != nil {
+		return nil, fmt.Errorf("execute search: %w", err)
+	}
+	defer searchResp.Body.Close()
+
+	if searchResp.StatusCode == http.StatusOK {
+		var searchResult struct {
+			Results []struct {
+				Result   string `json:"result"`
+				Verdicts struct {
+					Overall struct {
+						Score      int      `json:"score"`
+						Categories []string `json:"categories"`
+						Malicious  bool     `json:"malicious"`
+					} `json:"overall"`
+				} `json:"verdicts"`
+			} `json:"results"`
+		}
+
+		if err := json.NewDecoder(searchResp.Body).Decode(&searchResult); err == nil && len(searchResult.Results) > 0 {
+			r0 := searchResult.Results[0]
+			log.Printf("Found recent scan for %s. Using cached result.", u)
+
+			var finalAppDecision bool = false
+			if r0.Verdicts.Overall.Malicious || r0.Verdicts.Overall.Score > 0 {
+				finalAppDecision = true
+			} else {
+				for _, cat := range r0.Verdicts.Overall.Categories {
+					if cat == "phishing" || cat == "malware" {
+						finalAppDecision = true
+						break
+					}
+				}
+			}
+
+			return &Verdict{
+				Score:           r0.Verdicts.Overall.Score,
+				Cats:            r0.Verdicts.Overall.Categories,
+				Report:          r0.Result,
+				PlatformVerdict: r0.Verdicts.Overall.Malicious,
+				FinalDecision:   finalAppDecision,
+			}, nil
+		}
+	}
+
+	// --- 2. If No Recent Scan Found, Submit a New One (Fallback) ---
+	log.Printf("No recent scan found for %s. Submitting a new scan.", u)
+
+	// This is the polling logic from before
+	reqBody := strings.NewReader(`{"url":"` + u + `","visibility":"unlisted"}`)
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://urlscan.io/api/v1/scan/", reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("create submit req: %w", err)
+	}
+	req.Header.Set("API-Key", URLScanAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("submit scan: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read submit body: %w", err)
+	}
+
+	if resp.StatusCode == 400 {
+		s := string(bodyBytes)
+		if strings.Contains(s, "Scan prevented") || strings.Contains(s, "blocked from scanning") {
+			return nil, fmt.Errorf("blocked by urlscan and no prior public scans found for %s", u)
+		}
+		return nil, fmt.Errorf("submit error: %s: %s", resp.Status, s)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("submit error: %s: %s", resp.Status, string(bodyBytes))
+	}
+
+	var submitResp struct {
+		APIResultURL string `json:"api"`
+		ResultURL    string `json:"result"`
+		Message      string `json:"message"`
+	}
+	if err := json.Unmarshal(bodyBytes, &submitResp); err != nil {
+		return nil, fmt.Errorf("decode submit resp: %w: %s", err, string(bodyBytes))
+	}
+
+	if submitResp.APIResultURL == "" {
+		return nil, fmt.Errorf("submit response OK but no API result URL: %s", string(bodyBytes))
+	}
+	log.Printf("Scan submitted OK: %s. Polling %s...", submitResp.Message, submitResp.APIResultURL)
+
+	pollTicker := time.NewTicker(5 * time.Second)
+	defer pollTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("polling cancelled: %w", ctx.Err())
+		case <-pollTicker.C:
+			pollReq, _ := http.NewRequestWithContext(ctx, "GET", submitResp.APIResultURL, nil)
+			pollResp, err := c.Do(pollReq)
+			if err != nil {
+				log.Printf("Poll request failed (%s), retrying: %v", submitResp.APIResultURL, err)
+				continue
+			}
+
+			if pollResp.StatusCode == http.StatusNotFound {
+				log.Printf("Scan for %s not ready, will poll again...", u)
+				pollResp.Body.Close()
+				continue
+			}
+
+			if pollResp.StatusCode != http.StatusOK {
+				errBody, _ := io.ReadAll(pollResp.Body)
+				pollResp.Body.Close()
+				return nil, fmt.Errorf("poll error: %s: %s", pollResp.Status, string(errBody))
+			}
+
+			var result struct {
+				Verdicts struct {
+					Overall struct {
+						Score      int      `json:"score"`
+						Categories []string `json:"categories"`
+						Malicious  bool     `json:"malicious"`
+					} `json:"overall"`
+				} `json:"verdicts"`
+			}
+			if err := json.NewDecoder(pollResp.Body).Decode(&result); err != nil {
+				pollResp.Body.Close()
+				return nil, fmt.Errorf("decode final result: %w", err)
+			}
+			pollResp.Body.Close()
+
+			log.Printf("Scan complete for %s. Score: %d. Platform Malicious: %t", u, result.Verdicts.Overall.Score, result.Verdicts.Overall.Malicious)
+
+			var finalAppDecision bool = false
+			if result.Verdicts.Overall.Malicious || result.Verdicts.Overall.Score > 0 {
+				finalAppDecision = true
+			} else {
+				for _, cat := range result.Verdicts.Overall.Categories {
+					if cat == "phishing" || cat == "malware" {
+						finalAppDecision = true
+						break
+					}
+				}
+			}
+
+			return &Verdict{
+				Score:           result.Verdicts.Overall.Score,
+				Cats:            result.Verdicts.Overall.Categories,
+				Report:          submitResp.ResultURL,
+				PlatformVerdict: result.Verdicts.Overall.Malicious,
+				FinalDecision:   finalAppDecision,
+			}, nil
+		}
+	}
 }

@@ -8,17 +8,32 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/net/context"
+	"golang.org/x/net/html"
 
 	_ "github.com/glebarez/sqlite" // pure Go, no cgo needed
 	"github.com/joho/godotenv"
 )
 
 // --- Structs for JSON Output ---
-
+type TimingInfo struct {
+	TotalProcessing      string `json:"totalProcessing"`
+	EmlParsing           string `json:"emlParsing"`
+	ImageConversion      string `json:"imageConversion"`
+	DomainAnalysis       string `json:"domainAnalysis"`
+	UrlAnalysis          string `json:"urlAnalysis"`
+	TextAnalysis         string `json:"textAnalysis"`
+	RenderAndOcr         string `json:"renderAndOcr"`
+	RenderedTextAnalysis string `json:"renderedTextAnalysis"`
+	DatabaseReads        string `json:"databaseReads"`
+}
 type DomainAnalysisResult struct {
 	Status        string `json:"status"`
 	Message       string `json:"message"`
@@ -83,9 +98,11 @@ type FinalResult struct {
 	SuspectDomain    string                `json:"suspectDomain"`
 	SuspectSubdomain string                `json:"suspectSubdomain"`
 	DomainAnalysis   DomainAnalysisResult  `json:"domainAnalysis"`
+	UrlVerdicts      []Verdict             `json:"urlVerdicts"`
 	TextAnalysis     ContentAnalysisResult `json:"textAnalysis"`
 	RenderedAnalysis ContentAnalysisResult `json:"renderedAnalysis"`
 	Scores           ScoreResult           `json:"scores"`
+	Timings          TimingInfo            `json:"timings"`
 }
 
 // --- Global Variables & Existing Functions ---
@@ -112,6 +129,7 @@ func init() {
 	googleSearchAPIKey = os.Getenv("GOOGLE_SEARCH_API_KEY")
 	googleSearchCX = os.Getenv("GOOGLE_SEARCH_CX")
 	mainPrompt = os.Getenv("Main_Prompt")
+	URLScanAPIKey = os.Getenv("URLSCAN_API_KEY")
 }
 
 var (
@@ -119,11 +137,19 @@ var (
 	googleSearchAPIKey string
 	googleSearchCX     string
 	mainPrompt         string
+	URLScanAPIKey      string
 )
 var emailPath = "TestEmails"
 
 // --- Main Application Logic ---
 func main() {
+	requiredDirs := []string{emailPath, "attachments", "screenshots"}
+	for _, dir := range requiredDirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Fatalf("Failed to create essential directory %s: %v", dir, err)
+		}
+	}
+
 	// Wrap your existing handler with the CORS middleware
 	http.Handle("/process-eml", enableCORS(http.HandlerFunc(runEmailHandler)))
 
@@ -155,12 +181,14 @@ func enableCORS(next http.Handler) http.Handler {
 	})
 }
 func runEmailHandler(w http.ResponseWriter, r *http.Request) {
+	startEmlParsing := time.Now()
 
 	log.Println("Handling request...")
 
 	var baseScore = 0
 	var finalScoreNormal = 0
 	var finalScoreRendered = 0
+	var totalDatabaseReadTime time.Duration
 
 	// 1. Only allow POST requests
 	if r.Method != http.MethodPost {
@@ -212,7 +240,10 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	_ = os.Mkdir("attachments", 0o755)
 
 	// Parse the email file
+	startTaskTimer := time.Now()
+
 	env := parseEmail(fileName) // Capture the result here
+
 	finalResult.SuspectDomain = Email.Domain
 	finalResult.SuspectSubdomain = Email.subDomain
 	// The folder containing the images to convert.
@@ -264,6 +295,7 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		fmt.Println("\nImage conversion process finished.")
 	}
+	finalResult.Timings.EmlParsing = time.Since(startTaskTimer).String()
 
 	// Database setup
 	db, err := sql.Open("sqlite", "wikidata_websites4.db")
@@ -276,9 +308,12 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 			log.Println(err)
 		}
 	}(db)
+	startTaskTimer = time.Now()
 
 	// --- Domain Analysis ---
+	startDbRead := time.Now()
 	DomainReal, domain, err := checkDomainReal(db, Email.Domain)
+	totalDatabaseReadTime += time.Since(startDbRead)
 	if err != nil {
 		log.Println(err)
 		// TODO handle error gracefully
@@ -302,6 +337,104 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 		finalResult.DomainAnalysis.Message = "Domain is not in the known database, and no similarities were found."
 		finalResult.DomainAnalysis.ScoreImpact = AllChecks[1].Impact
 	}
+
+	log.Println("Extracting, filtering, and deduplicating URLs...")
+	urlsHTML := getURL(Email.HTML)
+	urlsPlainText := getURL(Email.Text)
+	initialURLs := append(urlsHTML, urlsPlainText...)
+
+	// Define file extensions to ignore as they are not typically malicious webpages
+	ignoredExtensions := map[string]struct{}{
+		".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {}, ".webp": {},
+		".css": {}, ".svg": {}, ".woff": {}, ".woff2": {}, ".ttf": {}, ".js": {},
+	}
+
+	// Use a map to handle deduplication automatically
+	uniqueURLs := make(map[string]struct{})
+
+	for _, u := range initialURLs {
+		// 1. Basic cleaning and Normalisation
+		// Decode HTML entities like &amp; -> &
+		decodedURL := html.UnescapeString(u)
+		trimmedURL := strings.TrimSpace(decodedURL)
+		if trimmedURL == "" {
+			continue
+		}
+
+		// 2. Filter by file extension
+		parsedURL, err := url.Parse(trimmedURL)
+		if err != nil {
+			log.Printf("Ignoring invalid URL: %s", trimmedURL)
+			continue // Ignore invalid URLs
+		}
+		ext := strings.ToLower(filepath.Ext(parsedURL.Path))
+		if _, shouldIgnore := ignoredExtensions[ext]; shouldIgnore {
+			log.Printf("Ignoring low-value URL due to extension: %s", trimmedURL)
+			continue
+		}
+
+		// 3. Add to the map to ensure uniqueness
+		uniqueURLs[trimmedURL] = struct{}{}
+	}
+
+	// Convert the map of unique URLs back to a slice and get their final destination
+	var finalURLsEmail []string
+	// We create a new map for final URLs to handle cases where different initial URLs redirect to the same final destination.
+	finalUniqueURLs := make(map[string]struct{})
+	for u := range uniqueURLs {
+		final, err := getFinalURL(r.Context(), u)
+		if err != nil || final == "" {
+			continue
+		}
+		finalUniqueURLs[final] = struct{}{}
+	}
+	for u := range finalUniqueURLs {
+		finalURLsEmail = append(finalURLsEmail, u)
+	}
+
+	log.Printf("Found %d unique, high-value URLs to scan.", len(finalURLsEmail))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	// Create a buffered channel to hold the results. The buffer size is the number of URLs.
+	resultsChan := make(chan Verdict, len(finalURLsEmail))
+
+	// Launch a separate goroutine for each URL to be scanned in parallel.
+	for _, u := range finalURLsEmail {
+		wg.Add(1) // Increment the WaitGroup counter.
+
+		go func(url string) {
+			defer wg.Done() // Decrement the counter when the goroutine completes.
+
+			v, err := checkURLs(ctx, url)
+			if err != nil {
+				// Don't stop everything, just log the error for this one URL.
+				log.Printf("Error scanning URL %s: %v", url, err)
+				return
+			}
+			if v != nil {
+				// Send the successful verdict to the channel.
+				resultsChan <- *v
+			}
+		}(u) // Pass 'u' as an argument to the goroutine to ensure the correct URL is used.
+	}
+
+	// Start a new goroutine that will wait for all scanning goroutines to finish, then close the channel.
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	// Collect all the results from the channel as they come in.
+	// This loop will automatically finish when the channel is closed.
+	for verdict := range resultsChan {
+		finalResult.UrlVerdicts = append(finalResult.UrlVerdicts, verdict)
+	}
+
+	finalResult.Timings.DomainAnalysis = time.Since(startTaskTimer).String()
+	startTaskTimer = time.Now()
 
 	// --- Normal (Text) Analysis ---
 	whoTheyAreResultNormal, err := whoTheyAre(true, fileName)
@@ -379,7 +512,9 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Populate text analysis results
-	populateContentAnalysis(&finalResult.TextAnalysis, &finalScoreNormal, whoTheyAreResultNormal, db, w)
+	populateContentAnalysis(&finalResult.TextAnalysis, &finalScoreNormal, whoTheyAreResultNormal, db, w, &totalDatabaseReadTime)
+	finalResult.Timings.TextAnalysis = time.Since(startTaskTimer).String()
+	startTaskTimer = time.Now()
 
 	// --- Rendered (HTML) Analysis ---
 	fileNameImage := RenderEmailHTML(env, fileName)
@@ -396,9 +531,9 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 		// Handle the case where no phone numbers are found in the email.
 		if len(phoneNumbersRendered) == 0 {
 			log.Println("No phone numbers found in the email.")
-			// Apply the score impact as per the original logic for no-numbers case.
-			finalResult.TextAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
-			finalScoreNormal += AllChecks[6].Impact
+			// **FIXED**: Apply score impact to the correct rendered analysis variables.
+			finalResult.RenderedAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
+			finalScoreRendered += AllChecks[6].Impact
 		} else {
 			// If phone numbers are found, iterate through each one.
 			for _, phoneNumber := range phoneNumbersRendered {
@@ -408,9 +543,9 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 				body, err := searchGoogle(phoneNumber)
 				if err != nil {
 					log.Printf("Error searching Google for phone number %s: %v", phoneNumber, err)
-					// Add the number as invalid and continue to the next.
-					finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers = append(
-						finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers,
+					// **FIXED**: Appending to the rendered analysis results.
+					finalResult.RenderedAnalysis.ContactMethodAnalysis.PhoneNumbers = append(
+						finalResult.RenderedAnalysis.ContactMethodAnalysis.PhoneNumbers,
 						PhoneNumbersValidation{PhoneNumber: phoneNumber, IsValid: false},
 					)
 					continue
@@ -433,8 +568,9 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 
 									// CRITICAL: Only apply score impact if it hasn't been applied yet.
 									if !scoreImpactApplied {
-										finalResult.TextAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
-										finalScoreNormal += AllChecks[6].Impact
+										// Apply score impact to the correct rendered analysis variables.
+										finalResult.RenderedAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
+										finalScoreRendered += AllChecks[6].Impact
 										scoreImpactApplied = true // Set the flag to prevent future score changes.
 									}
 								}
@@ -448,8 +584,9 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 				}
 
 				// Add the result for the current phone number to the final list.
-				finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers = append(
-					finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers,
+				// **FIXED**: Appending to the rendered analysis results.
+				finalResult.RenderedAnalysis.ContactMethodAnalysis.PhoneNumbers = append(
+					finalResult.RenderedAnalysis.ContactMethodAnalysis.PhoneNumbers,
 					PhoneNumbersValidation{PhoneNumber: phoneNumber, IsValid: isValid},
 				)
 			}
@@ -461,7 +598,8 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 		// TODO handle error gracefully
 	}
 	// Populate rendered analysis results
-	populateContentAnalysis(&finalResult.RenderedAnalysis, &finalScoreRendered, whoTheyAreResultRendered, db, w)
+	populateContentAnalysis(&finalResult.RenderedAnalysis, &finalScoreRendered, whoTheyAreResultRendered, db, w, &totalDatabaseReadTime)
+	finalResult.Timings.RenderedTextAnalysis = time.Since(startTaskTimer).String()
 
 	// --- Final Scoring ---
 	finalResult.Scores.BaseScore = baseScore
@@ -471,26 +609,29 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	finalResult.Scores.MaxPossibleScore = maxScoreVal
 	finalResult.Scores.NormalPercentage = (float64(finalResult.Scores.FinalScoreNormal) / float64(maxScoreVal)) * 100
 	finalResult.Scores.RenderedPercentage = (float64(finalResult.Scores.FinalScoreRendered) / float64(maxScoreVal)) * 100
+	finalResult.Timings.EmlParsing = time.Since(startEmlParsing).String()
+	finalResult.Timings.DatabaseReads = totalDatabaseReadTime.String()
 
 	// --- Output JSON ---
-	_, err = json.MarshalIndent(finalResult, "", "  ")
+	// Marshal the final result into a pretty-printed JSON string for console output
+	jsonOutput, err := json.MarshalIndent(finalResult, "", "  ")
 	if err != nil {
-		log.Printf("Error marshalling JSON: %v", err)
-		// TODO handle error gracefully
+		log.Printf("Error marshalling JSON for console output: %v", err)
+	} else {
+		// Print the final JSON string to the console
+		fmt.Println(string(jsonOutput))
 	}
-	//fmt.Println(string(jsonOutput))
+
 	// 4. Send the structured output back as a JSON response
 	w.Header().Set("Content-Type", "application/json")
-
-	err = json.NewEncoder(w).Encode(finalResult)
-	if err != nil {
+	if err := json.NewEncoder(w).Encode(finalResult); err != nil {
+		log.Printf("Error encoding JSON response: %v", err)
 		return
 	}
-
 }
 
 // Helper function to populate content analysis sections to reduce code duplication
-func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResult EmailAnalysis, db *sql.DB, w http.ResponseWriter) {
+func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResult EmailAnalysis, db *sql.DB, w http.ResponseWriter, dbTime *time.Duration) {
 	result.CompanyIdentification.Identified = whoResult.CompanyFound
 	result.CompanyIdentification.Name = whoResult.CompanyName
 	if whoResult.CompanyFound {
@@ -503,7 +644,9 @@ func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResul
 	}
 
 	if whoResult.CompanyFound {
+		startDbRead := time.Now()
 		verified, err := verifyCompany(db, whoResult)
+		*dbTime += time.Since(startDbRead)
 		if err != nil {
 			log.Printf("Error checking domain: %v", err)
 			http.Error(w, "Internal server error during domain analysis", http.StatusInternalServerError)
