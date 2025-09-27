@@ -41,6 +41,19 @@ type DomainAnalysisResult struct {
 	ScoreImpact   int    `json:"scoreImpact"`
 }
 
+type URLAnalysisResult struct {
+	Status         string `json:"status"`
+	Message        string `json:"message"`
+	MaliciousCount int    `json:"maliciousCount"`
+	ScoreImpact    int    `json:"scoreImpact"`
+}
+
+type ExecutableAnalysisResult struct {
+	Found       bool   `json:"found"`
+	Message     string `json:"message"`
+	ScoreImpact int    `json:"scoreImpact"`
+}
+
 type CompanyIdentificationResult struct {
 	Identified  bool   `json:"identified"`
 	Name        string `json:"name,omitempty"`
@@ -94,15 +107,17 @@ type ScoreResult struct {
 }
 
 type FinalResult struct {
-	EmailFile        string                `json:"emailFile"`
-	SuspectDomain    string                `json:"suspectDomain"`
-	SuspectSubdomain string                `json:"suspectSubdomain"`
-	DomainAnalysis   DomainAnalysisResult  `json:"domainAnalysis"`
-	UrlVerdicts      []Verdict             `json:"urlVerdicts"`
-	TextAnalysis     ContentAnalysisResult `json:"textAnalysis"`
-	RenderedAnalysis ContentAnalysisResult `json:"renderedAnalysis"`
-	Scores           ScoreResult           `json:"scores"`
-	Timings          TimingInfo            `json:"timings"`
+	EmailFile          string                   `json:"emailFile"`
+	SuspectDomain      string                   `json:"suspectDomain"`
+	SuspectSubdomain   string                   `json:"suspectSubdomain"`
+	DomainAnalysis     DomainAnalysisResult     `json:"domainAnalysis"`
+	URLAnalysis        URLAnalysisResult        `json:"urlAnalysis"`
+	UrlVerdicts        []Verdict                `json:"urlVerdicts"`
+	ExecutableAnalysis ExecutableAnalysisResult `json:"executableAnalysis"`
+	TextAnalysis       ContentAnalysisResult    `json:"textAnalysis"`
+	RenderedAnalysis   ContentAnalysisResult    `json:"renderedAnalysis"`
+	Scores             ScoreResult              `json:"scores"`
+	Timings            TimingInfo               `json:"timings"`
 }
 
 // --- Global Variables & Existing Functions ---
@@ -243,6 +258,25 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 	startTaskTimer := time.Now()
 
 	env := parseEmail(fileName) // Capture the result here
+	var executableFileCheck Check
+	for _, check := range AllChecks {
+		if check.Name == "ExecutableFileFound" {
+			executableFileCheck = check
+			break
+		}
+	}
+
+	foundExecutable, execMessage := analyseForExecutables(env)
+	finalResult.ExecutableAnalysis.Found = foundExecutable
+	finalResult.ExecutableAnalysis.Message = execMessage
+
+	if foundExecutable {
+		finalResult.ExecutableAnalysis.ScoreImpact = 0
+		log.Println(execMessage)
+	} else {
+		baseScore += executableFileCheck.Impact
+		finalResult.ExecutableAnalysis.ScoreImpact = executableFileCheck.Impact
+	}
 
 	finalResult.SuspectDomain = Email.Domain
 	finalResult.SuspectSubdomain = Email.subDomain
@@ -433,6 +467,41 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 		finalResult.UrlVerdicts = append(finalResult.UrlVerdicts, verdict)
 	}
 
+	// --- URL Analysis Scoring ---
+	var maliciousURLFound = false
+	var maliciousURLCount = 0
+	for _, verdict := range finalResult.UrlVerdicts {
+		if verdict.FinalDecision {
+			maliciousURLFound = true
+			maliciousURLCount++
+		}
+	}
+
+	// Find the MaliciousURLFound check from AllChecks
+	var maliciousURLCheck Check
+	for _, check := range AllChecks {
+		if check.Name == "MaliciousURLFound" {
+			maliciousURLCheck = check
+			break
+		}
+	}
+
+	if maliciousURLFound {
+		// If malicious, the score impact is 0.
+		finalResult.URLAnalysis.Status = "MaliciousURLsDetected"
+		finalResult.URLAnalysis.Message = fmt.Sprintf("%d URL(s) identified as malicious or suspicious.", maliciousURLCount)
+		finalResult.URLAnalysis.MaliciousCount = maliciousURLCount
+		finalResult.URLAnalysis.ScoreImpact = 0
+	} else {
+		// If safe, apply the positive score impact.
+		baseScore += maliciousURLCheck.Impact
+
+		finalResult.URLAnalysis.Status = "Clean"
+		finalResult.URLAnalysis.Message = "No malicious or suspicious URLs were found."
+		finalResult.URLAnalysis.MaliciousCount = 0
+		finalResult.URLAnalysis.ScoreImpact = maliciousURLCheck.Impact
+	}
+
 	finalResult.Timings.DomainAnalysis = time.Since(startTaskTimer).String()
 	startTaskTimer = time.Now()
 
@@ -484,8 +553,8 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 							companyTitle := strings.ToLower(sr2.Items[0].Title)
 
 							// Check if the company name matches and is not a banned word.
-							if strings.Contains(companyTitle, strings.ToLower(whoTheyAreResultNormal.CompanyName)) && !containsAny(companyTitle, bannedWords) {
-								log.Printf("Found a valid match for '%s' in search results for phone number %s.", whoTheyAreResultNormal.CompanyName, phoneNumber)
+							if whoTheyAreResultNormal.OrganizationName != "" && strings.Contains(companyTitle, strings.ToLower(whoTheyAreResultNormal.OrganizationName)) && !containsAny(companyTitle, bannedWords) {
+								log.Printf("Found a valid match for '%s' in search results for phone number %s.", whoTheyAreResultNormal.OrganizationName, phoneNumber)
 								isValid = true // Mark this number as valid.
 
 								// CRITICAL: Only apply score impact if it hasn't been applied yet.
@@ -562,15 +631,14 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 								companyTitle := strings.ToLower(sr2.Items[0].Title)
 
 								// Check if the company name matches and is not a banned word.
-								if strings.Contains(companyTitle, strings.ToLower(whoTheyAreResultNormal.CompanyName)) && !containsAny(companyTitle, bannedWords) {
-									log.Printf("Found a valid match for '%s' in search results for phone number %s.", whoTheyAreResultNormal.CompanyName, phoneNumber)
+								if whoTheyAreResultNormal.OrganizationName != "" && strings.Contains(companyTitle, strings.ToLower(whoTheyAreResultNormal.OrganizationName)) && !containsAny(companyTitle, bannedWords) {
+									log.Printf("Found a valid match for '%s' in search results for phone number %s.", whoTheyAreResultNormal.OrganizationName, phoneNumber)
 									isValid = true // Mark this number as valid.
 
 									// CRITICAL: Only apply score impact if it hasn't been applied yet.
 									if !scoreImpactApplied {
-										// Apply score impact to the correct rendered analysis variables.
-										finalResult.RenderedAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
-										finalScoreRendered += AllChecks[6].Impact
+										finalResult.TextAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
+										finalScoreNormal += AllChecks[6].Impact
 										scoreImpactApplied = true // Set the flag to prevent future score changes.
 									}
 								}
@@ -632,9 +700,9 @@ func runEmailHandler(w http.ResponseWriter, r *http.Request) {
 
 // Helper function to populate content analysis sections to reduce code duplication
 func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResult EmailAnalysis, db *sql.DB, w http.ResponseWriter, dbTime *time.Duration) {
-	result.CompanyIdentification.Identified = whoResult.CompanyFound
-	result.CompanyIdentification.Name = whoResult.CompanyName
-	if whoResult.CompanyFound {
+	result.CompanyIdentification.Identified = whoResult.OrganizationFound
+	result.CompanyIdentification.Name = whoResult.OrganizationName
+	if whoResult.OrganizationFound {
 		*score += AllChecks[3].Impact
 		result.CompanyIdentification.ScoreImpact = AllChecks[3].Impact
 	} else {
@@ -643,7 +711,7 @@ func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResul
 		result.CompanyIdentification.ScoreImpact = 0
 	}
 
-	if whoResult.CompanyFound {
+	if whoResult.OrganizationFound {
 		startDbRead := time.Now()
 		verified, err := verifyCompany(db, whoResult)
 		*dbTime += time.Since(startDbRead)

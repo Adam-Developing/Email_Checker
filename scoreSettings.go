@@ -44,6 +44,16 @@ var AllChecks = []Check{
 		Description: "Phone number is valid and matches the company",
 		Impact:      25,
 	},
+	{
+		Name:        "MaliciousURLFound",
+		Description: "A URL in the email was identified as malicious or suspicious",
+		Impact:      25,
+	},
+	{
+		Name:        "ExecutableFileFound",
+		Description: "A file in the email was identified as an executable",
+		Impact:      25,
+	},
 }
 
 // MaxScore returns the highest possible total score.
