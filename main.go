@@ -13,16 +13,28 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/jhillyerd/enmime"
 	"golang.org/x/net/context"
 	"golang.org/x/net/html"
 
-	_ "github.com/glebarez/sqlite" // pure Go, no cgo needed
+	_ "github.com/glebarez/sqlite"
 	"github.com/joho/godotenv"
 )
 
-// --- Structs for JSON Output ---
+type URLScanUpdate struct {
+	URL           string `json:"url"`
+	FinalDecision bool   `json:"finalDecision"`
+	Report        string `json:"report"`
+	Error         string `json:"error,omitempty"`
+}
+
+type URLScanStartInfo struct {
+	Total int `json:"total"`
+}
+
 type TimingInfo struct {
 	TotalProcessing      string `json:"totalProcessing"`
 	EmlParsing           string `json:"emlParsing"`
@@ -35,55 +47,47 @@ type TimingInfo struct {
 	DatabaseReads        string `json:"databaseReads"`
 }
 type DomainAnalysisResult struct {
-	Status        string `json:"status"`
-	Message       string `json:"message"`
-	MatchedDomain string `json:"matchedDomain"`
-	ScoreImpact   int    `json:"scoreImpact"`
+	Status           string `json:"status"`
+	Message          string `json:"message"`
+	MatchedDomain    string `json:"matchedDomain"`
+	ScoreImpact      int    `json:"scoreImpact"`
+	SuspectSubdomain string `json:"suspectSubdomain"` // Added for context
 }
-
 type URLAnalysisResult struct {
-	Status         string `json:"status"`
-	Message        string `json:"message"`
-	MaliciousCount int    `json:"maliciousCount"`
-	ScoreImpact    int    `json:"scoreImpact"`
+	Status         string    `json:"status"`
+	Message        string    `json:"message"`
+	MaliciousCount int       `json:"maliciousCount"`
+	ScoreImpact    int       `json:"scoreImpact"`
+	UrlVerdicts    []Verdict `json:"urlVerdicts"` // Embed verdicts
 }
-
 type ExecutableAnalysisResult struct {
 	Found       bool   `json:"found"`
 	Message     string `json:"message"`
 	ScoreImpact int    `json:"scoreImpact"`
 }
-
 type CompanyIdentificationResult struct {
 	Identified  bool   `json:"identified"`
 	Name        string `json:"name,omitempty"`
 	ScoreImpact int    `json:"scoreImpact"`
 }
-
 type CompanyVerificationResult struct {
 	Verified    bool   `json:"verified"`
 	Message     string `json:"message"`
 	ScoreImpact int    `json:"scoreImpact"`
 }
-
 type ActionAnalysisResult struct {
 	ActionRequired bool   `json:"actionRequired"`
 	Action         string `json:"action"`
 }
-
 type RealismAnalysisResult struct {
 	IsRealistic bool   `json:"isRealistic"`
 	Reason      string `json:"reason"`
 	ScoreImpact int    `json:"scoreImpact"`
 }
-
-// PhoneNumberValidation holds a single phone number and its validation status.
 type PhoneNumbersValidation struct {
 	PhoneNumber string `json:"phoneNumber"`
 	IsValid     bool   `json:"isValid"`
 }
-
-// ContactMethodResult has been updated to include a list of phone number validation results.
 type ContactMethodResult struct {
 	PhoneNumbers []PhoneNumbersValidation `json:"phoneNumbers"`
 	ScoreImpact  int                      `json:"scoreImpact"`
@@ -95,6 +99,7 @@ type ContentAnalysisResult struct {
 	Summary               string                      `json:"summary"`
 	RealismAnalysis       RealismAnalysisResult       `json:"realismAnalysis"`
 	ContactMethodAnalysis ContactMethodResult         `json:"contactMethodAnalysis"`
+	Error                 string                      `json:"error,omitempty"`
 }
 
 type ScoreResult struct {
@@ -106,18 +111,10 @@ type ScoreResult struct {
 	RenderedPercentage float64 `json:"renderedPercentage"`
 }
 
-type FinalResult struct {
-	EmailFile          string                   `json:"emailFile"`
-	SuspectDomain      string                   `json:"suspectDomain"`
-	SuspectSubdomain   string                   `json:"suspectSubdomain"`
-	DomainAnalysis     DomainAnalysisResult     `json:"domainAnalysis"`
-	URLAnalysis        URLAnalysisResult        `json:"urlAnalysis"`
-	UrlVerdicts        []Verdict                `json:"urlVerdicts"`
-	ExecutableAnalysis ExecutableAnalysisResult `json:"executableAnalysis"`
-	TextAnalysis       ContentAnalysisResult    `json:"textAnalysis"`
-	RenderedAnalysis   ContentAnalysisResult    `json:"renderedAnalysis"`
-	Scores             ScoreResult              `json:"scores"`
-	Timings            TimingInfo               `json:"timings"`
+// Struct for streaming individual check results
+type CheckResult struct {
+	EventName string      `json:"eventName"`
+	Payload   interface{} `json:"payload"`
 }
 
 // --- Global Variables & Existing Functions ---
@@ -165,571 +162,394 @@ func main() {
 		}
 	}
 
-	// Wrap your existing handler with the CORS middleware
-	http.Handle("/process-eml", enableCORS(http.HandlerFunc(runEmailHandler)))
-
-	// Define the port to listen on
+	http.Handle("/process-eml-stream", enableCORS(http.HandlerFunc(streamEmailHandler)))
 	port := "8080"
 	log.Printf("Starting server on port %s...\n", port)
-
-	// Start the web server
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Printf("Error starting server: %s\n", err)
 	}
 }
 
-// New CORS middleware function
 func enableCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Set headers to allow cross-origin requests
-		w.Header().Set("Access-Control-Allow-Origin", "*") // Allow any origin
-		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
-
-		// If it's a preflight (OPTIONS) request, we can just send the headers and exit.
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == "OPTIONS" {
 			return
 		}
-
-		// Otherwise, serve the next handler
 		next.ServeHTTP(w, r)
 	})
 }
-func runEmailHandler(w http.ResponseWriter, r *http.Request) {
-	startEmlParsing := time.Now()
 
-	log.Println("Handling request...")
-
-	var baseScore = 0
-	var finalScoreNormal = 0
-	var finalScoreRendered = 0
-	var totalDatabaseReadTime time.Duration
-
-	// 1. Only allow POST requests
-	if r.Method != http.MethodPost {
-		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
+	// 1. Set headers for SSE
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
 		return
 	}
 
-	// Read the Base64 encoded data from the request body
+	// 2. Initial file processing
 	base64Data, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Error reading request body", http.StatusInternalServerError)
+		log.Printf("Error reading request body: %v", err)
 		return
 	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			log.Printf("Error closing request body: %v", err)
-			http.Error(w, "Error closing request body", http.StatusInternalServerError)
-		}
-	}(r.Body)
-
-	// **FIX**: Decode the Base64 data to get the raw EML content
+	defer r.Body.Close()
 	emlData, err := base64.StdEncoding.DecodeString(string(base64Data))
 	if err != nil {
 		log.Printf("Error decoding base64 data: %v", err)
-		http.Error(w, "Error decoding base64 data from client", http.StatusBadRequest)
 		return
 	}
-	// Write the *decoded* EML data to a temporary file
-	fileName := emailPath + "/" + fmt.Sprintf("%d_%s", time.Now().UnixNano(), "REAL WORLD TEST.eml")
+	fileName := filepath.Join(emailPath, fmt.Sprintf("%d_%s", time.Now().UnixNano(), "streamed.eml"))
 	if err := os.WriteFile(fileName, emlData, 0644); err != nil {
 		log.Printf("Error writing temp eml file: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-
-	// Clean up the temporary file when done
-	//defer os.Remove(tempFileName) //TODO Uncomment this line in production
-
-	// Initialize the final result structure
-	finalResult := FinalResult{
-		EmailFile: fileName,
-	}
-
-	// File system setup
-	if err := os.RemoveAll("attachments"); err != nil {
-		log.Println(err)
-	}
+	_ = os.RemoveAll("attachments")
 	_ = os.Mkdir("attachments", 0o755)
 
-	// Parse the email file
-	startTaskTimer := time.Now()
+	env, fileName := parseEmail(fileName)
 
-	env := parseEmail(fileName) // Capture the result here
-	var executableFileCheck Check
-	for _, check := range AllChecks {
-		if check.Name == "ExecutableFileFound" {
-			executableFileCheck = check
-			break
+	// Channel for final results from each main analysis function
+	resultsChan := make(chan CheckResult)
+	// This channel will safely handle all messages sent to the client.
+	eventChan := make(chan CheckResult)
+
+	// Start a single "writer" goroutine. It safely listens on eventChan and writes to the client.
+	// 1. Create a WaitGroup specifically for the writer goroutine.
+	var writerWg sync.WaitGroup
+	writerWg.Add(1) // We have one writer goroutine to wait for.
+
+	go func() {
+		// 2. Ensure Done is called when this goroutine exits.
+		defer writerWg.Done()
+
+		for event := range eventChan {
+			jsonData, err := json.Marshal(event.Payload)
+			if err != nil {
+				log.Printf("Error marshalling event data for %s: %v", event.EventName, err)
+				continue
+			}
+			fmt.Fprintf(w, "event: %s\n", event.EventName)
+			fmt.Fprintf(w, "data: %s\n\n", jsonData)
+			flusher.Flush()
 		}
+	}()
+
+	eventChan <- CheckResult{
+		EventName: "maxScore",
+		Payload:   map[string]float64{"maxScore": MaxScore()},
 	}
 
-	foundExecutable, execMessage := analyseForExecutables(env)
-	finalResult.ExecutableAnalysis.Found = foundExecutable
-	finalResult.ExecutableAnalysis.Message = execMessage
+	db, err := sql.Open("sqlite", "wikidata_websites4.db")
+	if err != nil {
+		log.Printf("Database connection failed: %v", err)
+		close(eventChan)
+		return
+	}
+	defer db.Close()
 
-	if foundExecutable {
-		finalResult.ExecutableAnalysis.ScoreImpact = 0
-		log.Println(execMessage)
-	} else {
-		baseScore += executableFileCheck.Impact
-		finalResult.ExecutableAnalysis.ScoreImpact = executableFileCheck.Impact
+	var totalDatabaseReadTimeNanos int64
+	const numChecks = 5
+	var analysisWg sync.WaitGroup // Renamed for clarity from 'wg'
+	analysisWg.Add(numChecks)
+
+	go performDomainAnalysis(&analysisWg, resultsChan, db, Email.Domain, Email.subDomain, &totalDatabaseReadTimeNanos)
+	go performURLAnalysis(&analysisWg, resultsChan, eventChan, r.Context())
+	go performExecutableAnalysis(&analysisWg, resultsChan, env)
+	go performTextAnalysis(&analysisWg, resultsChan, fileName, db, &totalDatabaseReadTimeNanos)
+	go performRenderedAnalysis(&analysisWg, resultsChan, fileName, env, db, &totalDatabaseReadTimeNanos)
+
+	go func() {
+		analysisWg.Wait()
+		close(resultsChan)
+	}()
+
+	allCheckData := make(map[string]interface{})
+	for result := range resultsChan {
+		allCheckData[result.EventName] = result.Payload
+		eventChan <- result
 	}
 
-	finalResult.SuspectDomain = Email.Domain
-	finalResult.SuspectSubdomain = Email.subDomain
-	// The folder containing the images to convert.
-	inputDir := "attachments"
+	scores := calculateFinalScores(allCheckData)
+	eventChan <- CheckResult{EventName: "finalScores", Payload: scores}
 
-	// Check if the input directory exists.
-	if _, err := os.Stat(inputDir); os.IsNotExist(err) {
-		fmt.Printf("Error: The directory '%s' does not exist. Please create it and add your images.\n", inputDir)
+	close(eventChan)
+
+	// 3. Wait for the writer goroutine to finish before the handler returns.
+	writerWg.Wait()
+
+	log.Println("Streaming complete for request.")
+}
+
+// --- Analysis Functions (Refactored to send results to a channel) ---
+
+func performDomainAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, db *sql.DB, domain, subdomain string, dbTime *int64) {
+	defer wg.Done()
+	startDbRead := time.Now()
+	domainReal, matchedDomain, err := checkDomainReal(db, domain)
+	atomic.AddInt64(dbTime, time.Since(startDbRead).Nanoseconds())
+	if err != nil {
+		log.Printf("Domain analysis failed: %v", err)
+		// Send an error or empty result? For now, we'll just log it.
 		return
 	}
 
-	// Walk through all the files in the directory.
-	err = filepath.Walk(inputDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		// Skip directories.
-		if info.IsDir() {
-			return nil
-		}
-		// Get the file extension and convert it to lowercase.
-		ext := strings.ToLower(filepath.Ext(path))
-
-		// Check if the file is one of the types we want to ignore.
-		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp" {
-			fmt.Printf("Skipping file '%s' (already a supported format).\n", path)
-			return nil
-		}
-		// Attempt to convert the file.
-		if err := convertImageToJPG(path); err != nil {
-			if !strings.Contains(err.Error(), "executable file not found") {
-				fmt.Printf("An error occurred processing %s: %v\n", path, err)
-			}
-		} else {
-			err := os.Remove(path)
-			if err != nil {
-				// If deletion fails, report the error but don't fail the whole process,
-				// as the conversion itself was successful.
-				return fmt.Errorf("could not remove original file '%s': %w", path, err)
-			}
-
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		fmt.Printf("An error occurred while walking the directory: %v\n", err)
-	} else {
-		fmt.Println("\nImage conversion process finished.")
+	result := DomainAnalysisResult{MatchedDomain: matchedDomain, SuspectSubdomain: subdomain}
+	switch domainReal {
+	case 0:
+		result.Status = "DomainImpersonation"
+		result.Message = fmt.Sprintf("A similar domain '%s' is in the known database.", matchedDomain)
+		result.ScoreImpact = AllChecks[2].Impact
+	case 1:
+		result.Status = "DomainExactMatch"
+		result.Message = "Domain is in the known database."
+		result.ScoreImpact = AllChecks[0].Impact
+	case 2:
+		result.Status = "DomainNoSimilarity"
+		result.Message = "Domain not in database, and no similarities found."
+		result.ScoreImpact = AllChecks[1].Impact
 	}
-	finalResult.Timings.EmlParsing = time.Since(startTaskTimer).String()
+	ch <- CheckResult{EventName: "domainAnalysis", Payload: result}
+}
 
-	// Database setup
-	db, err := sql.Open("sqlite", "wikidata_websites4.db")
-	if err != nil {
-		log.Println(err)
-	}
-	defer func(db *sql.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Println(err)
-		}
-	}(db)
-	startTaskTimer = time.Now()
-
-	// --- Domain Analysis ---
-	startDbRead := time.Now()
-	DomainReal, domain, err := checkDomainReal(db, Email.Domain)
-	totalDatabaseReadTime += time.Since(startDbRead)
-	if err != nil {
-		log.Println(err)
-		// TODO handle error gracefully
-	}
-
-	finalResult.DomainAnalysis.MatchedDomain = domain
-	switch DomainReal {
-	case 0: // Impersonation
-		baseScore += AllChecks[2].Impact
-		finalResult.DomainAnalysis.Status = "DomainImpersonation"
-		finalResult.DomainAnalysis.Message = fmt.Sprintf("A similar domain '%s' is in the known database. This is likely an attempt to impersonate a legitimate entity.", domain)
-		finalResult.DomainAnalysis.ScoreImpact = AllChecks[2].Impact
-	case 1: // Exact Match
-		baseScore += AllChecks[0].Impact
-		finalResult.DomainAnalysis.Status = "DomainExactMatch"
-		finalResult.DomainAnalysis.Message = "Domain is in the known database."
-		finalResult.DomainAnalysis.ScoreImpact = AllChecks[0].Impact
-	case 2: // No Similarity
-		baseScore += AllChecks[1].Impact
-		finalResult.DomainAnalysis.Status = "DomainNoSimilarity"
-		finalResult.DomainAnalysis.Message = "Domain is not in the known database, and no similarities were found."
-		finalResult.DomainAnalysis.ScoreImpact = AllChecks[1].Impact
-	}
-
-	log.Println("Extracting, filtering, and deduplicating URLs...")
-	urlsHTML := getURL(Email.HTML)
-	urlsPlainText := getURL(Email.Text)
-	initialURLs := append(urlsHTML, urlsPlainText...)
-
-	// Define file extensions to ignore as they are not typically malicious webpages
-	ignoredExtensions := map[string]struct{}{
-		".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {}, ".webp": {},
-		".css": {}, ".svg": {}, ".woff": {}, ".woff2": {}, ".ttf": {}, ".js": {},
-	}
-
-	// Use a map to handle deduplication automatically
+func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan chan<- CheckResult, rCtx context.Context) {
+	defer wg.Done()
+	ctx, cancel := context.WithTimeout(rCtx, 3*time.Minute)
+	defer cancel()
+	// (URL extraction logic)
+	initialURLs := append(getURL(Email.HTML), getURL(Email.Text)...)
+	ignoredExtensions := map[string]struct{}{".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {}, ".webp": {}, ".css": {}, ".svg": {}, ".woff": {}, ".woff2": {}, ".ttf": {}, ".js": {}}
 	uniqueURLs := make(map[string]struct{})
-
 	for _, u := range initialURLs {
-		// 1. Basic cleaning and Normalisation
-		// Decode HTML entities like &amp; -> &
-		decodedURL := html.UnescapeString(u)
-		trimmedURL := strings.TrimSpace(decodedURL)
-		if trimmedURL == "" {
-			continue
+		decodedURL := html.UnescapeString(strings.TrimSpace(u))
+		if parsedURL, err := url.Parse(decodedURL); err == nil {
+			if _, ignore := ignoredExtensions[strings.ToLower(filepath.Ext(parsedURL.Path))]; !ignore {
+				uniqueURLs[decodedURL] = struct{}{}
+			}
 		}
-
-		// 2. Filter by file extension
-		parsedURL, err := url.Parse(trimmedURL)
-		if err != nil {
-			log.Printf("Ignoring invalid URL: %s", trimmedURL)
-			continue // Ignore invalid URLs
-		}
-		ext := strings.ToLower(filepath.Ext(parsedURL.Path))
-		if _, shouldIgnore := ignoredExtensions[ext]; shouldIgnore {
-			log.Printf("Ignoring low-value URL due to extension: %s", trimmedURL)
-			continue
-		}
-
-		// 3. Add to the map to ensure uniqueness
-		uniqueURLs[trimmedURL] = struct{}{}
 	}
-
-	// Convert the map of unique URLs back to a slice and get their final destination
 	var finalURLsEmail []string
-	// We create a new map for final URLs to handle cases where different initial URLs redirect to the same final destination.
 	finalUniqueURLs := make(map[string]struct{})
 	for u := range uniqueURLs {
-		final, err := getFinalURL(r.Context(), u)
-		if err != nil || final == "" {
-			continue
+		if final, err := getFinalURL(ctx, u); err == nil && final != "" {
+			finalUniqueURLs[final] = struct{}{}
 		}
-		finalUniqueURLs[final] = struct{}{}
 	}
 	for u := range finalUniqueURLs {
 		finalURLsEmail = append(finalURLsEmail, u)
 	}
 
-	log.Printf("Found %d unique, high-value URLs to scan.", len(finalURLsEmail))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-
-	var wg sync.WaitGroup
-	// Create a buffered channel to hold the results. The buffer size is the number of URLs.
-	resultsChan := make(chan Verdict, len(finalURLsEmail))
-
-	// Launch a separate goroutine for each URL to be scanned in parallel.
+	// Send urlScanStarted event to the central channel
+	eventChan <- CheckResult{
+		EventName: "urlScanStarted",
+		Payload:   URLScanStartInfo{Total: len(finalURLsEmail)},
+	}
+	var urlWg sync.WaitGroup
+	verdictsChan := make(chan Verdict, len(finalURLsEmail))
 	for _, u := range finalURLsEmail {
-		wg.Add(1) // Increment the WaitGroup counter.
-
+		urlWg.Add(1)
 		go func(url string) {
-			defer wg.Done() // Decrement the counter when the goroutine completes.
-
-			v, err := checkURLs(ctx, url)
-			if err != nil {
-				// Don't stop everything, just log the error for this one URL.
+			defer urlWg.Done()
+			if v, err := checkURLs(ctx, url); err == nil && v != nil {
+				verdictsChan <- *v
+				// Stream individual result back to the central event channel
+				eventChan <- CheckResult{
+					EventName: "urlScanResult",
+					Payload:   URLScanUpdate{URL: url, FinalDecision: v.FinalDecision, Report: v.Report},
+				}
+			} else if err != nil {
 				log.Printf("Error scanning URL %s: %v", url, err)
-				return
+				// Stream error back to the central event channel
+				eventChan <- CheckResult{
+					EventName: "urlScanResult",
+					Payload:   URLScanUpdate{URL: url, Error: err.Error()},
+				}
 			}
-			if v != nil {
-				// Send the successful verdict to the channel.
-				resultsChan <- *v
-			}
-		}(u) // Pass 'u' as an argument to the goroutine to ensure the correct URL is used.
+		}(u)
+	}
+	urlWg.Wait()
+	close(verdictsChan)
+
+	var verdicts []Verdict
+	for v := range verdictsChan {
+		verdicts = append(verdicts, v)
 	}
 
-	// Start a new goroutine that will wait for all scanning goroutines to finish, then close the channel.
-	go func() {
-		wg.Wait()
-		close(resultsChan)
-	}()
-
-	// Collect all the results from the channel as they come in.
-	// This loop will automatically finish when the channel is closed.
-	for verdict := range resultsChan {
-		finalResult.UrlVerdicts = append(finalResult.UrlVerdicts, verdict)
-	}
-
-	// --- URL Analysis Scoring ---
-	var maliciousURLFound = false
-	var maliciousURLCount = 0
-	for _, verdict := range finalResult.UrlVerdicts {
-		if verdict.FinalDecision {
-			maliciousURLFound = true
+	maliciousURLCount := 0
+	for _, v := range verdicts {
+		if v.FinalDecision {
 			maliciousURLCount++
 		}
 	}
 
-	// Find the MaliciousURLFound check from AllChecks
-	var maliciousURLCheck Check
-	for _, check := range AllChecks {
-		if check.Name == "MaliciousURLFound" {
-			maliciousURLCheck = check
+	var check Check
+	for _, c := range AllChecks {
+		if c.Name == "MaliciousURLFound" {
+			check = c
 			break
 		}
 	}
 
-	if maliciousURLFound {
-		// If malicious, the score impact is 0.
-		finalResult.URLAnalysis.Status = "MaliciousURLsDetected"
-		finalResult.URLAnalysis.Message = fmt.Sprintf("%d URL(s) identified as malicious or suspicious.", maliciousURLCount)
-		finalResult.URLAnalysis.MaliciousCount = maliciousURLCount
-		finalResult.URLAnalysis.ScoreImpact = 0
+	result := URLAnalysisResult{UrlVerdicts: verdicts, MaliciousCount: maliciousURLCount}
+	if maliciousURLCount > 0 {
+		result.Status = "MaliciousURLsDetected"
+		result.Message = fmt.Sprintf("%d malicious URL(s) were detected.", maliciousURLCount)
+		result.ScoreImpact = 0 // No points if malicious URLs are found
 	} else {
-		// If safe, apply the positive score impact.
-		baseScore += maliciousURLCheck.Impact
-
-		finalResult.URLAnalysis.Status = "Clean"
-		finalResult.URLAnalysis.Message = "No malicious or suspicious URLs were found."
-		finalResult.URLAnalysis.MaliciousCount = 0
-		finalResult.URLAnalysis.ScoreImpact = maliciousURLCheck.Impact
+		result.Status = "Clean"
+		result.Message = "No malicious URLs were found."
+		result.ScoreImpact = check.Impact
 	}
+	ch <- CheckResult{EventName: "urlAnalysis", Payload: result}
+}
 
-	finalResult.Timings.DomainAnalysis = time.Since(startTaskTimer).String()
-	startTaskTimer = time.Now()
+func performExecutableAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, env *enmime.Envelope) {
+	defer wg.Done() // This line is new!
+	var check Check
+	for _, c := range AllChecks {
+		if c.Name == "ExecutableFileFound" {
+			check = c
+			break
+		}
+	}
+	found, message := analyseForExecutables(env)
+	result := ExecutableAnalysisResult{Found: found, Message: message}
+	if !found {
+		result.ScoreImpact = check.Impact
+	}
+	ch <- CheckResult{EventName: "executableAnalysis", Payload: result}
+}
 
-	// --- Normal (Text) Analysis ---
-	whoTheyAreResultNormal, err := whoTheyAre(true, fileName)
+func performTextAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, fileName string, db *sql.DB, dbTime *int64) {
+	defer wg.Done()
+	whoResult, err := whoTheyAre(true, fileName)
 	if err != nil {
-		log.Println(err)
-		// TODO handle error gracefully
+		log.Printf("Normal text analysis failed: %v", err)
+		// Send an error payload instead of just returning
+		ch <- CheckResult{
+			EventName: "textAnalysis",
+			Payload:   ContentAnalysisResult{Error: "Failed to analyse email content."},
+		}
+		return
 	}
-	bannedWords := []string{"scam", "fraud", "warning"}
+	var result ContentAnalysisResult
+	populateContentAnalysis(&result, whoResult, db, dbTime)
 
-	// Initialise the slice in the final result.
-	finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers = []PhoneNumbersValidation{}
-	var scoreImpactApplied bool // This flag tracks if we've already applied the score.
-
-	phoneNumbersText := extractPhoneNumbersFromEmail(Email.Text + "\n" + Email.HTML)
-
-	// Handle the case where no phone numbers are found in the email.
-	if len(phoneNumbersText) == 0 {
-		log.Println("No phone numbers found in the email.")
-		// Apply the score impact as per the original logic for no-numbers case.
-		finalResult.TextAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
-		finalScoreNormal += AllChecks[6].Impact
+	// Phone Number Validation (logic is the same as before)
+	phoneNumbers := extractPhoneNumbersFromEmail(Email.Text + "\n" + Email.HTML)
+	result.ContactMethodAnalysis.PhoneNumbers = []PhoneNumbersValidation{}
+	if len(phoneNumbers) == 0 {
+		result.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
 	} else {
-		// If phone numbers are found, iterate through each one.
-		for _, phoneNumber := range phoneNumbersText {
-			isValid := false // Assume the number is not valid by default.
-
-			// The validation logic from your original code is preserved here.
-			body, err := searchGoogle(phoneNumber)
-			if err != nil {
-				log.Printf("Error searching Google for phone number %s: %v", phoneNumber, err)
-				// Add the number as invalid and continue to the next.
-				finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers = append(
-					finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers,
-					PhoneNumbersValidation{PhoneNumber: phoneNumber, IsValid: false},
-				)
-				continue
-			}
-
-			if string(body) != "" {
-				var sr GoogleSearchResult
-				if err := json.Unmarshal(body, &sr); err == nil && len(sr.Items) > 0 {
-					DisplayLink := strings.ToLower(sr.Items[0].DisplayLink)
-					body, err := searchGoogle(DisplayLink)
-					if err == nil && string(body) != "" {
-						var sr2 GoogleSearchResult
-						if err := json.Unmarshal(body, &sr2); err == nil && len(sr2.Items) > 0 {
+		var scoreImpactApplied bool
+		bannedWords := []string{"scam", "fraud", "warning"}
+		for _, number := range phoneNumbers {
+			isValid := false
+			if body, err := searchGoogle(number); err == nil && string(body) != "" {
+				var sr, sr2 GoogleSearchResult
+				if json.Unmarshal(body, &sr) == nil && len(sr.Items) > 0 {
+					if body2, err2 := searchGoogle(sr.Items[0].DisplayLink); err2 == nil && string(body2) != "" {
+						if json.Unmarshal(body2, &sr2) == nil && len(sr2.Items) > 0 {
 							companyTitle := strings.ToLower(sr2.Items[0].Title)
-
-							// Check if the company name matches and is not a banned word.
-							if whoTheyAreResultNormal.OrganizationName != "" && strings.Contains(companyTitle, strings.ToLower(whoTheyAreResultNormal.OrganizationName)) && !containsAny(companyTitle, bannedWords) {
-								log.Printf("Found a valid match for '%s' in search results for phone number %s.", whoTheyAreResultNormal.OrganizationName, phoneNumber)
-								isValid = true // Mark this number as valid.
-
-								// CRITICAL: Only apply score impact if it hasn't been applied yet.
+							if whoResult.OrganizationName != "" && strings.Contains(companyTitle, strings.ToLower(whoResult.OrganizationName)) && !containsAny(companyTitle, bannedWords) {
+								isValid = true
 								if !scoreImpactApplied {
-									finalResult.TextAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
-									finalScoreNormal += AllChecks[6].Impact
-									scoreImpactApplied = true // Set the flag to prevent future score changes.
+									result.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
+									scoreImpactApplied = true
 								}
 							}
 						}
 					}
 				}
 			}
-
-			if !isValid {
-				log.Printf("No valid match found for phone number %s.", phoneNumber)
-			}
-
-			// Add the result for the current phone number to the final list.
-			finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers = append(
-				finalResult.TextAnalysis.ContactMethodAnalysis.PhoneNumbers,
-				PhoneNumbersValidation{PhoneNumber: phoneNumber, IsValid: isValid},
-			)
+			result.ContactMethodAnalysis.PhoneNumbers = append(result.ContactMethodAnalysis.PhoneNumbers, PhoneNumbersValidation{PhoneNumber: number, IsValid: isValid})
 		}
 	}
-	// Populate text analysis results
-	populateContentAnalysis(&finalResult.TextAnalysis, &finalScoreNormal, whoTheyAreResultNormal, db, w, &totalDatabaseReadTime)
-	finalResult.Timings.TextAnalysis = time.Since(startTaskTimer).String()
-	startTaskTimer = time.Now()
 
-	// --- Rendered (HTML) Analysis ---
+	ch <- CheckResult{EventName: "textAnalysis", Payload: result}
+}
+
+func performRenderedAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, fileName string, env *enmime.Envelope, db *sql.DB, dbTime *int64) {
+	defer wg.Done() // This line is new!
+
+	// Rendering logic
 	fileNameImage := RenderEmailHTML(env, fileName)
 	renderEmailText := OCRImage(fileNameImage)
 
+	var result ContentAnalysisResult
 	if renderEmailText == "" {
-		log.Println("No text extracted from the rendered email.")
+		log.Println("No text extracted from rendered email.")
 	} else {
-		phoneNumbersRendered := extractPhoneNumbersFromEmail(renderEmailText)
-		// Initialise the slice in the final result.
-		finalResult.RenderedAnalysis.ContactMethodAnalysis.PhoneNumbers = []PhoneNumbersValidation{}
-		var scoreImpactApplied bool // This flag tracks if we've already applied the score.
-
-		// Handle the case where no phone numbers are found in the email.
-		if len(phoneNumbersRendered) == 0 {
-			log.Println("No phone numbers found in the email.")
-			// **FIXED**: Apply score impact to the correct rendered analysis variables.
-			finalResult.RenderedAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
-			finalScoreRendered += AllChecks[6].Impact
+		whoResult, err := whoTheyAre(false, fileName)
+		if err != nil {
+			log.Printf("Rendered text analysis failed: %v", err)
+			ch <- CheckResult{
+				EventName: "renderedAnalysis",
+				Payload:   ContentAnalysisResult{Error: "Failed to analyse rendered email screenshot."},
+			}
+			return
 		} else {
-			// If phone numbers are found, iterate through each one.
-			for _, phoneNumber := range phoneNumbersRendered {
-				isValid := false // Assume the number is not valid by default.
+			populateContentAnalysis(&result, whoResult, db, dbTime)
 
-				// The validation logic from your original code is preserved here.
-				body, err := searchGoogle(phoneNumber)
-				if err != nil {
-					log.Printf("Error searching Google for phone number %s: %v", phoneNumber, err)
-					// **FIXED**: Appending to the rendered analysis results.
-					finalResult.RenderedAnalysis.ContactMethodAnalysis.PhoneNumbers = append(
-						finalResult.RenderedAnalysis.ContactMethodAnalysis.PhoneNumbers,
-						PhoneNumbersValidation{PhoneNumber: phoneNumber, IsValid: false},
-					)
-					continue
-				}
-
-				if string(body) != "" {
-					var sr GoogleSearchResult
-					if err := json.Unmarshal(body, &sr); err == nil && len(sr.Items) > 0 {
-						DisplayLink := strings.ToLower(sr.Items[0].DisplayLink)
-						body, err := searchGoogle(DisplayLink)
-						if err == nil && string(body) != "" {
-							var sr2 GoogleSearchResult
-							if err := json.Unmarshal(body, &sr2); err == nil && len(sr2.Items) > 0 {
-								companyTitle := strings.ToLower(sr2.Items[0].Title)
-
-								// Check if the company name matches and is not a banned word.
-								if whoTheyAreResultNormal.OrganizationName != "" && strings.Contains(companyTitle, strings.ToLower(whoTheyAreResultNormal.OrganizationName)) && !containsAny(companyTitle, bannedWords) {
-									log.Printf("Found a valid match for '%s' in search results for phone number %s.", whoTheyAreResultNormal.OrganizationName, phoneNumber)
-									isValid = true // Mark this number as valid.
-
-									// CRITICAL: Only apply score impact if it hasn't been applied yet.
-									if !scoreImpactApplied {
-										finalResult.TextAnalysis.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
-										finalScoreNormal += AllChecks[6].Impact
-										scoreImpactApplied = true // Set the flag to prevent future score changes.
+			// Phone Number Validation (Rendered)
+			phoneNumbers := extractPhoneNumbersFromEmail(renderEmailText)
+			result.ContactMethodAnalysis.PhoneNumbers = []PhoneNumbersValidation{}
+			if len(phoneNumbers) == 0 {
+				result.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
+			} else {
+				// (Same phone validation logic as text analysis)
+				var scoreImpactApplied bool
+				bannedWords := []string{"scam", "fraud", "warning"}
+				for _, number := range phoneNumbers {
+					isValid := false
+					if body, err := searchGoogle(number); err == nil && string(body) != "" {
+						var sr, sr2 GoogleSearchResult
+						if json.Unmarshal(body, &sr) == nil && len(sr.Items) > 0 {
+							if body2, err2 := searchGoogle(sr.Items[0].DisplayLink); err2 == nil && string(body2) != "" {
+								if json.Unmarshal(body2, &sr2) == nil && len(sr2.Items) > 0 {
+									companyTitle := strings.ToLower(sr2.Items[0].Title)
+									if whoResult.OrganizationName != "" && strings.Contains(companyTitle, strings.ToLower(whoResult.OrganizationName)) && !containsAny(companyTitle, bannedWords) {
+										isValid = true
+										if !scoreImpactApplied {
+											result.ContactMethodAnalysis.ScoreImpact = AllChecks[6].Impact
+											scoreImpactApplied = true
+										}
 									}
 								}
 							}
 						}
 					}
+					result.ContactMethodAnalysis.PhoneNumbers = append(result.ContactMethodAnalysis.PhoneNumbers, PhoneNumbersValidation{PhoneNumber: number, IsValid: isValid})
 				}
-
-				if !isValid {
-					log.Printf("No valid match found for phone number %s.", phoneNumber)
-				}
-
-				// Add the result for the current phone number to the final list.
-				// **FIXED**: Appending to the rendered analysis results.
-				finalResult.RenderedAnalysis.ContactMethodAnalysis.PhoneNumbers = append(
-					finalResult.RenderedAnalysis.ContactMethodAnalysis.PhoneNumbers,
-					PhoneNumbersValidation{PhoneNumber: phoneNumber, IsValid: isValid},
-				)
 			}
 		}
 	}
-	whoTheyAreResultRendered, err := whoTheyAre(false, fileName)
-	if err != nil {
-		log.Println(err)
-		// TODO handle error gracefully
-	}
-	// Populate rendered analysis results
-	populateContentAnalysis(&finalResult.RenderedAnalysis, &finalScoreRendered, whoTheyAreResultRendered, db, w, &totalDatabaseReadTime)
-	finalResult.Timings.RenderedTextAnalysis = time.Since(startTaskTimer).String()
-
-	// --- Final Scoring ---
-	finalResult.Scores.BaseScore = baseScore
-	finalResult.Scores.FinalScoreNormal = finalScoreNormal + baseScore
-	finalResult.Scores.FinalScoreRendered = finalScoreRendered + baseScore
-	maxScoreVal := MaxScore()
-	finalResult.Scores.MaxPossibleScore = maxScoreVal
-	finalResult.Scores.NormalPercentage = (float64(finalResult.Scores.FinalScoreNormal) / float64(maxScoreVal)) * 100
-	finalResult.Scores.RenderedPercentage = (float64(finalResult.Scores.FinalScoreRendered) / float64(maxScoreVal)) * 100
-	finalResult.Timings.EmlParsing = time.Since(startEmlParsing).String()
-	finalResult.Timings.DatabaseReads = totalDatabaseReadTime.String()
-
-	// --- Output JSON ---
-	// Marshal the final result into a pretty-printed JSON string for console output
-	jsonOutput, err := json.MarshalIndent(finalResult, "", "  ")
-	if err != nil {
-		log.Printf("Error marshalling JSON for console output: %v", err)
-	} else {
-		// Print the final JSON string to the console
-		fmt.Println(string(jsonOutput))
-	}
-
-	// 4. Send the structured output back as a JSON response
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(finalResult); err != nil {
-		log.Printf("Error encoding JSON response: %v", err)
-		return
-	}
+	ch <- CheckResult{EventName: "renderedAnalysis", Payload: result}
 }
 
-// Helper function to populate content analysis sections to reduce code duplication
-func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResult EmailAnalysis, db *sql.DB, w http.ResponseWriter, dbTime *time.Duration) {
+// Helper function remains the same
+func populateContentAnalysis(result *ContentAnalysisResult, whoResult EmailAnalysis, db *sql.DB, dbTimeNanos *int64) {
 	result.CompanyIdentification.Identified = whoResult.OrganizationFound
 	result.CompanyIdentification.Name = whoResult.OrganizationName
 	if whoResult.OrganizationFound {
-		*score += AllChecks[3].Impact
 		result.CompanyIdentification.ScoreImpact = AllChecks[3].Impact
-	} else {
-		//*score -= AllChecks[3].Impact
-		//result.CompanyIdentification.ScoreImpact = -AllChecks[3].Impact
-		result.CompanyIdentification.ScoreImpact = 0
-	}
-
-	if whoResult.OrganizationFound {
-		startDbRead := time.Now()
+		dbReadStart := time.Now()
 		verified, err := verifyCompany(db, whoResult)
-		*dbTime += time.Since(startDbRead)
+		atomic.AddInt64(dbTimeNanos, time.Since(dbReadStart).Nanoseconds())
 		if err != nil {
-			log.Printf("Error checking domain: %v", err)
-			http.Error(w, "Internal server error during domain analysis", http.StatusInternalServerError)
-
-			// TODO handle error gracefully
+			log.Printf("Error verifying company: %v", err)
 		}
 		result.CompanyVerification.Verified = verified
 		if verified {
-			*score += AllChecks[4].Impact
 			result.CompanyVerification.ScoreImpact = AllChecks[4].Impact
 			result.CompanyVerification.Message = "The sender's domain aligns with the company they claim to be."
 		} else {
-			//*score -= AllChecks[4].Impact
-			//result.CompanyVerification.ScoreImpact = -AllChecks[4].Impact
-			//result.CompanyVerification.ScoreImpact = 0
 			result.CompanyVerification.Message = "Could not verify the sender's domain against the identified company."
 		}
 	}
@@ -741,12 +561,51 @@ func populateContentAnalysis(result *ContentAnalysisResult, score *int, whoResul
 	result.RealismAnalysis.IsRealistic = whoResult.Realistic
 	result.RealismAnalysis.Reason = whoResult.RealisticReason
 	if whoResult.Realistic {
-		*score += AllChecks[5].Impact
 		result.RealismAnalysis.ScoreImpact = AllChecks[5].Impact
-	} else {
-		//*score -= AllChecks[5].Impact
-		//result.RealismAnalysis.ScoreImpact = -AllChecks[5].Impact
-		result.RealismAnalysis.ScoreImpact = 0
+	}
+}
+
+// New function to calculate scores at the end
+func calculateFinalScores(data map[string]interface{}) ScoreResult {
+	var scores ScoreResult
+	var baseScore int
+
+	if execData, ok := data["executableAnalysis"].(ExecutableAnalysisResult); ok {
+		baseScore += execData.ScoreImpact
+	}
+	if domainData, ok := data["domainAnalysis"].(DomainAnalysisResult); ok {
+		baseScore += domainData.ScoreImpact
+	}
+	if urlData, ok := data["urlAnalysis"].(URLAnalysisResult); ok {
+		baseScore += urlData.ScoreImpact
 	}
 
+	scores.BaseScore = baseScore
+	finalScoreNormal := baseScore
+	finalScoreRendered := baseScore
+
+	if textData, ok := data["textAnalysis"].(ContentAnalysisResult); ok {
+		finalScoreNormal += textData.CompanyIdentification.ScoreImpact
+		finalScoreNormal += textData.CompanyVerification.ScoreImpact
+		finalScoreNormal += textData.RealismAnalysis.ScoreImpact
+		finalScoreNormal += textData.ContactMethodAnalysis.ScoreImpact
+	}
+
+	if renderedData, ok := data["renderedAnalysis"].(ContentAnalysisResult); ok {
+		finalScoreRendered += renderedData.CompanyIdentification.ScoreImpact
+		finalScoreRendered += renderedData.CompanyVerification.ScoreImpact
+		finalScoreRendered += renderedData.RealismAnalysis.ScoreImpact
+		finalScoreRendered += renderedData.ContactMethodAnalysis.ScoreImpact
+	}
+
+	scores.FinalScoreNormal = finalScoreNormal
+	scores.FinalScoreRendered = finalScoreRendered
+	maxScoreVal := MaxScore()
+	scores.MaxPossibleScore = maxScoreVal
+	if maxScoreVal > 0 {
+		scores.NormalPercentage = (float64(finalScoreNormal) / maxScoreVal) * 100
+		scores.RenderedPercentage = (float64(finalScoreRendered) / maxScoreVal) * 100
+	}
+
+	return scores
 }

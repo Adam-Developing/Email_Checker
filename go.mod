@@ -14,6 +14,7 @@ require (
 	github.com/lithammer/fuzzysearch v1.1.8
 	github.com/nyaruka/phonenumbers v1.6.3
 	golang.org/x/net v0.40.0
+	google.golang.org/api v0.197.0
 	google.golang.org/genai v1.6.0
 )
 

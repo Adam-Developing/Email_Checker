@@ -12,12 +12,12 @@ var AllChecks = []Check{
 	{
 		Name:        "DomainExactMatch",
 		Description: "Sender domain exactly matches a known good entry",
-		Impact:      +25,
+		Impact:      +30,
 	},
 	{
 		Name:        "DomainNoSimilarity",
 		Description: "Sender domain not in database and no close matches",
-		Impact:      +25,
+		Impact:      +5,
 	},
 	{
 		Name:        "DomainImpersonation",
@@ -27,7 +27,7 @@ var AllChecks = []Check{
 	{
 		Name:        "CompanyIdentified",
 		Description: "NLP (Gemini) successfully identifies claimed company",
-		Impact:      25,
+		Impact:      5,
 	},
 	{
 		Name:        "CompanyVerified",
@@ -37,22 +37,22 @@ var AllChecks = []Check{
 	{
 		Name:        "RealismCheck",
 		Description: "Content judged realistic (no ludicrous offers or demands)",
-		Impact:      25,
+		Impact:      10,
 	},
 	{
 		Name:        "CorrectPhoneNumber",
 		Description: "Phone number is valid and matches the company",
-		Impact:      25,
+		Impact:      5,
 	},
 	{
 		Name:        "MaliciousURLFound",
 		Description: "A URL in the email was identified as malicious or suspicious",
-		Impact:      25,
+		Impact:      10,
 	},
 	{
 		Name:        "ExecutableFileFound",
 		Description: "A file in the email was identified as an executable",
-		Impact:      25,
+		Impact:      5,
 	},
 }
 
