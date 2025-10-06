@@ -35,17 +35,6 @@ type URLScanStartInfo struct {
 	Total int `json:"total"`
 }
 
-type TimingInfo struct {
-	TotalProcessing      string `json:"totalProcessing"`
-	EmlParsing           string `json:"emlParsing"`
-	ImageConversion      string `json:"imageConversion"`
-	DomainAnalysis       string `json:"domainAnalysis"`
-	UrlAnalysis          string `json:"urlAnalysis"`
-	TextAnalysis         string `json:"textAnalysis"`
-	RenderAndOcr         string `json:"renderAndOcr"`
-	RenderedTextAnalysis string `json:"renderedTextAnalysis"`
-	DatabaseReads        string `json:"databaseReads"`
-}
 type DomainAnalysisResult struct {
 	Status           string `json:"status"`
 	Message          string `json:"message"`
