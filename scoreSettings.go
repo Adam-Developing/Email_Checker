@@ -17,7 +17,7 @@ var AllChecks = []Check{
 	{
 		Name:        "DomainNoSimilarity",
 		Description: "Sender domain not in database and no close matches",
-		Impact:      +5,
+		Impact:      +15,
 	},
 	{
 		Name:        "DomainImpersonation",

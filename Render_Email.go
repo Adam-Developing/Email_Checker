@@ -24,29 +24,17 @@ var screenshotFileName string
 
 // RenderEmailHTML renders the email's HTML content in a headless browser and saves a screenshot.
 // It correctly handles embedded images (cid:) by saving them as temporary files and rewriting the HTML.
-func RenderEmailHTML(env *enmime.Envelope, fileName string) string {
-	// --- Step 1: Create a temporary directory for all rendering assets ---
-	tempDir, err := os.MkdirTemp("", "email-render-*")
-	if err != nil {
-		log.Printf("Failed to create temp directory: %v", err)
-		return ""
-	}
-	defer func(path string) {
-		err := os.RemoveAll(path)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}(tempDir)
+func RenderEmailHTML(env *enmime.Envelope, fileName string, sandboxDir string) string {
 
 	// --- Step 2: Rewrite the HTML to use local file paths for embedded images ---
-	modifiedHTML, err := rewriteHTMLForRendering(env, tempDir)
+	modifiedHTML, err := rewriteHTMLForRendering(env, sandboxDir)
 	if err != nil {
 		log.Printf("Failed to rewrite HTML for rendering: %v", err)
 		return ""
 	}
 
 	// Save the modified HTML to the temporary directory.
-	tempFile := filepath.Join(tempDir, "email.html")
+	tempFile := filepath.Join(sandboxDir, "email.html")
 	if err := os.WriteFile(tempFile, []byte(modifiedHTML), 0644); err != nil {
 		log.Printf("Failed to write temp HTML file: %v", err)
 		return ""
@@ -87,13 +75,15 @@ func RenderEmailHTML(env *enmime.Envelope, fileName string) string {
 	}
 
 	// --- Step 5: Save the screenshot to the "screenshots" directory ---
-	if err := os.MkdirAll("screenshots", 0755); err != nil {
+
+	screenshotsDir := filepath.Join(sandboxDir, "screenshots")
+	if err := os.MkdirAll(screenshotsDir, 0755); err != nil {
 		log.Printf("Failed to create screenshots directory: %v", err)
 		return ""
 	}
 
 	screenshotFileName = strings.TrimSuffix(filepath.Base(fileName), filepath.Ext(fileName)) + ".png"
-	screenshotFile := filepath.Join("screenshots", screenshotFileName)
+	screenshotFile := filepath.Join(screenshotsDir, screenshotFileName)
 
 	if err := os.WriteFile(screenshotFile, buf, 0644); err != nil {
 		log.Printf("Failed to save screenshot: %v", err)

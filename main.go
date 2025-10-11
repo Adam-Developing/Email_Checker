@@ -188,21 +188,29 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Error reading request body: %v", err)
 		return
 	}
+	// Create a unique sandbox directory for this entire request.
+	sandboxDir, err := os.MkdirTemp("", "email-checker-*")
+	if err != nil {
+		http.Error(w, "Failed to create sandbox directory", http.StatusInternalServerError)
+		log.Printf("Error creating sandbox dir: %v", err)
+		return
+	}
+	// Use defer to GUARANTEE the entire sandbox is deleted when the handler finishes.
+	defer os.RemoveAll(sandboxDir)
+
 	defer r.Body.Close()
 	emlData, err := base64.StdEncoding.DecodeString(string(base64Data))
 	if err != nil {
 		log.Printf("Error decoding base64 data: %v", err)
 		return
 	}
-	fileName := filepath.Join(emailPath, fmt.Sprintf("%d_%s", time.Now().UnixNano(), "streamed.eml"))
+	fileName := filepath.Join(sandboxDir, "original.eml")
 	if err := os.WriteFile(fileName, emlData, 0644); err != nil {
 		log.Printf("Error writing temp eml file: %v", err)
 		return
 	}
-	_ = os.RemoveAll("attachments")
-	_ = os.Mkdir("attachments", 0o755)
 
-	env, fileName := parseEmail(fileName)
+	env, fileName := parseEmail(fileName, sandboxDir)
 
 	// Channel for final results from each main analysis function
 	resultsChan := make(chan CheckResult)
@@ -251,8 +259,8 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 	go performDomainAnalysis(&analysisWg, resultsChan, db, Email.Domain, Email.subDomain, &totalDatabaseReadTimeNanos)
 	go performURLAnalysis(&analysisWg, resultsChan, eventChan, r.Context())
 	go performExecutableAnalysis(&analysisWg, resultsChan, env)
-	go performTextAnalysis(&analysisWg, resultsChan, fileName, db, &totalDatabaseReadTimeNanos)
-	go performRenderedAnalysis(&analysisWg, resultsChan, fileName, env, db, &totalDatabaseReadTimeNanos)
+	go performTextAnalysis(&analysisWg, resultsChan, fileName, db, &totalDatabaseReadTimeNanos, sandboxDir)
+	go performRenderedAnalysis(&analysisWg, resultsChan, fileName, env, db, &totalDatabaseReadTimeNanos, sandboxDir)
 
 	go func() {
 		analysisWg.Wait()
@@ -415,9 +423,9 @@ func performExecutableAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, env *e
 	ch <- CheckResult{EventName: "executableAnalysis", Payload: result}
 }
 
-func performTextAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, fileName string, db *sql.DB, dbTime *int64) {
+func performTextAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, fileName string, db *sql.DB, dbTime *int64, sandboxDir string) {
 	defer wg.Done()
-	whoResult, err := whoTheyAre(true, fileName)
+	whoResult, err := whoTheyAre(true, fileName, sandboxDir)
 	if err != nil {
 		log.Printf("Normal text analysis failed: %v", err)
 		// Send an error payload instead of just returning
@@ -464,18 +472,18 @@ func performTextAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, fileName str
 	ch <- CheckResult{EventName: "textAnalysis", Payload: result}
 }
 
-func performRenderedAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, fileName string, env *enmime.Envelope, db *sql.DB, dbTime *int64) {
-	defer wg.Done() // This line is new!
+func performRenderedAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, fileName string, env *enmime.Envelope, db *sql.DB, dbTime *int64, sandboxDir string) {
+	defer wg.Done()
 
 	// Rendering logic
-	fileNameImage := RenderEmailHTML(env, fileName)
+	fileNameImage := RenderEmailHTML(env, fileName, sandboxDir)
 	renderEmailText := OCRImage(fileNameImage)
 
 	var result ContentAnalysisResult
 	if renderEmailText == "" {
 		log.Println("No text extracted from rendered email.")
 	} else {
-		whoResult, err := whoTheyAre(false, fileName)
+		whoResult, err := whoTheyAre(false, fileName, sandboxDir)
 		if err != nil {
 			log.Printf("Rendered text analysis failed: %v", err)
 			ch <- CheckResult{

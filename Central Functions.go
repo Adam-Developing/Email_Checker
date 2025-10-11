@@ -265,7 +265,7 @@ func imgSrcs(htmlStr string) []string {
 	}
 }
 
-func parseEmail(fileName string) (*enmime.Envelope, string) {
+func parseEmail(fileName string, sandboxDir string) (*enmime.Envelope, string) {
 	f, err := os.Open(fileName)
 	if err != nil {
 		log.Fatal(err)
@@ -315,8 +315,10 @@ func parseEmail(fileName string) (*enmime.Envelope, string) {
 		}
 	}
 
-	_ = os.RemoveAll("attachments") // start fresh
-	_ = os.MkdirAll("attachments", 0o755)
+	// Create the attachments directory inside the sandbox.
+	attachmentsDir := filepath.Join(sandboxDir, "attachments")
+	_ = os.RemoveAll(attachmentsDir) // Start fresh inside the sandbox
+	_ = os.MkdirAll(attachmentsDir, 0o755)
 
 	/* ---------- save inline & attached images ---------- */
 	savePart := func(p *enmime.Part, prefix string, n int) {
@@ -331,7 +333,7 @@ func parseEmail(fileName string) (*enmime.Envelope, string) {
 				name = fmt.Sprintf("%s-%d.bin", prefix, n)
 			}
 		}
-		_ = os.WriteFile(filepath.Join("attachments", name), p.Content, 0o644)
+		_ = os.WriteFile(filepath.Join(attachmentsDir, name), p.Content, 0o644)
 	}
 	for i, p := range env.Inlines {
 		savePart(p, "inline", i)
@@ -382,7 +384,7 @@ func parseEmail(fileName string) (*enmime.Envelope, string) {
 						ext = "." + m[1]
 					}
 					fn := fmt.Sprintf("data-%d%s", i, ext)
-					_ = os.WriteFile(filepath.Join("attachments", fn), data, 0o644)
+					_ = os.WriteFile(filepath.Join(attachmentsDir, fn), data, 0o644)
 				}
 			}
 
@@ -391,7 +393,7 @@ func parseEmail(fileName string) (*enmime.Envelope, string) {
 			src = "https:" + src
 			fallthrough
 		case strings.HasPrefix(src, "http://"), strings.HasPrefix(src, "https://"):
-			saveRemoteImage(src, i)
+			saveRemoteImage(src, i, attachmentsDir)
 		}
 	}
 	for i, src := range extractCSSBackgrounds(Email.HTML) {
@@ -415,7 +417,7 @@ func parseEmail(fileName string) (*enmime.Envelope, string) {
 						ext = "." + m[1]
 					}
 					fn := fmt.Sprintf("cssbg-%d%s", i, ext)
-					err := os.WriteFile(filepath.Join("attachments", fn), data, 0o644)
+					err := os.WriteFile(filepath.Join(attachmentsDir, fn), data, 0o644)
 					if err != nil {
 						log.Fatal(err)
 						// TODO handle error gracefully
@@ -427,11 +429,11 @@ func parseEmail(fileName string) (*enmime.Envelope, string) {
 			src = "https:" + src
 			fallthrough
 		case strings.HasPrefix(src, "http://"), strings.HasPrefix(src, "https://"):
-			saveRemoteImage(src, i+1000)
+			saveRemoteImage(src, i+1000, attachmentsDir)
 		}
 	}
 	// Image conversion logic
-	filepath.Walk("attachments", func(path string, info os.FileInfo, err error) error {
+	filepath.Walk(attachmentsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return err
 		}
@@ -466,7 +468,7 @@ func extractCSSBackgrounds(htmlStr string) []string {
 }
 
 // saveRemoteImage fetches an image from the given src URL.
-func saveRemoteImage(src string, i int) {
+func saveRemoteImage(src string, i int, attachmentsDir string) {
 	var err error
 	u, err := url.Parse(src)
 	if err != nil {
@@ -520,7 +522,7 @@ func saveRemoteImage(src string, i int) {
 		}
 	}
 
-	if err := os.WriteFile(filepath.Join("attachments", name), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(attachmentsDir, name), data, 0o644); err != nil {
 		log.Println("Failed to save remote image:", err)
 		// TODO handle error gracefully
 	}
@@ -645,7 +647,7 @@ func checkDomainReal(db *sql.DB, domainReal string) (int, string, error) {
 	return 2, ascii, nil
 }
 
-func whoTheyAre(initial bool, fileName string) (EmailAnalysis, error) {
+func whoTheyAre(initial bool, fileName string, sandboxDir string) (EmailAnalysis, error) {
 	// Read raw EML
 
 	f, err := os.Open(fileName)
@@ -673,7 +675,7 @@ func whoTheyAre(initial bool, fileName string) (EmailAnalysis, error) {
 	var contents []*genai.Content
 
 	if !initial && screenshotFileName != "" {
-		filePath := filepath.Join("screenshots", screenshotFileName)
+		filePath := filepath.Join(sandboxDir, "screenshots", screenshotFileName)
 		b, err := os.ReadFile(filePath)
 		if err == nil {
 			if emailMime := http.DetectContentType(b); strings.HasPrefix(emailMime, "image/") {
@@ -685,12 +687,13 @@ func whoTheyAre(initial bool, fileName string) (EmailAnalysis, error) {
 		}
 	} else {
 
-		if items, err := os.ReadDir("attachments"); err == nil {
+		attachmentsDir := filepath.Join(sandboxDir, "attachments")
+		if items, err := os.ReadDir(attachmentsDir); err == nil {
 			for _, it := range items {
 				if it.IsDir() {
 					continue
 				}
-				b, err := os.ReadFile(filepath.Join("attachments", it.Name()))
+				b, err := os.ReadFile(filepath.Join(attachmentsDir, it.Name()))
 				if err != nil {
 					continue
 				}
@@ -801,6 +804,10 @@ func verifyCompany(db *sql.DB, whoTheyAreResult EmailAnalysis) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if domain, err := publicsuffix.EffectiveTLDPlusOne(linkDomain); err == nil {
+		linkDomain = domain
+	}
+
 	return linkDomain == Email.Domain, nil
 }
 
@@ -897,7 +904,8 @@ func extractPhoneNumbersFromEmail(text string) []string {
 
 	unique := make(map[string]struct{})
 	var result []string
-	regionsToTry := []string{"US", "GB", "DE", "AU", "FR", "IN"}
+	//regionsToTry := []string{"US", "GB", "DE", "AU", "FR", "IN"}
+	regionsToTry := []string{"GB"}
 
 	for _, match := range matches {
 		if len(match) > 1 {
