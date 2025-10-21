@@ -27,10 +27,36 @@ var screenshotFileName string
 func RenderEmailHTML(env *enmime.Envelope, fileName string, sandboxDir string) string {
 
 	// --- Step 2: Rewrite the HTML to use local file paths for embedded images ---
-	modifiedHTML, err := rewriteHTMLForRendering(env, sandboxDir)
-	if err != nil {
-		log.Printf("Failed to rewrite HTML for rendering: %v", err)
-		return ""
+	var modifiedHTML string
+	var err error
+
+	if strings.TrimSpace(env.HTML) == "" && strings.TrimSpace(env.Text) != "" {
+		// The email is plain text. We must convert it to basic HTML to render it.
+		escapedText := html.EscapeString(env.Text)
+
+		// Create a simple HTML document. The CSS style preserves whitespace and line breaks.
+		modifiedHTML = fmt.Sprintf(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    body {
+                        font-family: Verdana, sans-serif !important;
+                        white-space: pre-wrap;
+                        word-wrap: break-word;
+                    }
+                </style>
+            </head>
+            <body>%s</body>
+            </html>`, escapedText)
+	} else {
+		// The email has HTML, so we process it to handle embedded images.
+		modifiedHTML, err = rewriteHTMLForRendering(env, sandboxDir)
+		if err != nil {
+			log.Printf("Failed to rewrite HTML for rendering: %v", err)
+			return ""
+		}
 	}
 
 	// Save the modified HTML to the temporary directory.

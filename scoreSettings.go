@@ -17,7 +17,7 @@ var AllChecks = []Check{
 	{
 		Name:        "DomainNoSimilarity",
 		Description: "Sender domain not in database and no close matches",
-		Impact:      +15,
+		Impact:      +17,
 	},
 	{
 		Name:        "DomainImpersonation",
@@ -25,24 +25,29 @@ var AllChecks = []Check{
 		Impact:      0,
 	},
 	{
+		Name:        "freeMailMatch",
+		Description: "Sender is from a freeMail (e.g., Gmail, Outlook) which is not professional for business",
+		Impact:      +12,
+	},
+	{
 		Name:        "CompanyIdentified",
 		Description: "NLP (Gemini) successfully identifies claimed company",
-		Impact:      5,
+		Impact:      3,
 	},
 	{
 		Name:        "CompanyVerified",
 		Description: "Verified that the sender’s domain matches the company they claim",
-		Impact:      25,
+		Impact:      20,
 	},
 	{
 		Name:        "RealismCheck",
 		Description: "Content judged realistic (no ludicrous offers or demands)",
-		Impact:      10,
+		Impact:      25,
 	},
 	{
 		Name:        "CorrectPhoneNumber",
 		Description: "Phone number is valid and matches the company",
-		Impact:      5,
+		Impact:      4,
 	},
 	{
 		Name:        "MaliciousURLFound",
@@ -52,7 +57,7 @@ var AllChecks = []Check{
 	{
 		Name:        "ExecutableFileFound",
 		Description: "A file in the email was identified as an executable",
-		Impact:      5,
+		Impact:      3,
 	},
 }
 
@@ -64,7 +69,7 @@ func MaxScore() float64 {
 
 	for _, c := range AllChecks {
 		// Find the highest positive impact among domain-related checks
-		if c.Name == "DomainExactMatch" || c.Name == "DomainNoSimilarity" {
+		if c.Name == "DomainExactMatch" || c.Name == "DomainNoSimilarity" || c.Name == "freeMailMatch" {
 			if c.Impact > maxDomainScore {
 				maxDomainScore = c.Impact
 			}

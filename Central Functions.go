@@ -12,6 +12,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
+	"net"
 	"net/http"
 	"net/mail"
 	"net/textproto"
@@ -293,14 +294,30 @@ func parseEmail(fileName string, sandboxDir string) (*enmime.Envelope, string) {
 	/* ---------- truncate & clean ---------- */
 	Email.HTML = cutHTML(Email.HTML)
 
-	txt, err := html2text.FromString(Email.HTML, html2text.Options{PrettyTables: false})
+	if strings.TrimSpace(Email.HTML) != "" {
+		// If HTML is present, truncate it and convert it to plain text.
+		Email.HTML = cutHTML(Email.HTML)
+		txt, err := html2text.FromString(Email.HTML, html2text.Options{PrettyTables: false})
+		if err != nil {
+			log.Fatal(err)
+			// TODO handle error gracefully
+		}
+		Email.Text = txt // Overwrite text with the HTML-derived version.
+	} else {
+		// If no HTML is present, truncate the plain text at the first major line break.
+		re := regexp.MustCompile(`\n{10,}`)
+		loc := re.FindStringIndex(Email.Text)
 
-	if err != nil {
-		log.Fatal(err)
-		// TODO handle error gracefully
+		cleanedText := Email.Text
+		if loc != nil {
+			// If loads of newlines are found, take only the text before them.
+			cleanedText = Email.Text[:loc[0]]
+		}
+
+		Email.Text = strings.TrimSpace(cleanedText)
+		Email.HTML = "" // Ensure the HTML part is empty.
+
 	}
-
-	Email.Text = txt
 
 	cleanFileName := strings.Replace(fileName, ".eml", "-clean.eml", 1)
 	if err := updateEMLUniversal(cleanFileName, env, Email.Text, Email.HTML); err != nil {
@@ -709,7 +726,14 @@ func whoTheyAre(initial bool, fileName string, sandboxDir string) (EmailAnalysis
 		}
 	}
 	contents = append(contents, genai.NewContentFromText(prompt, "user"))
+	var method string
+	if initial {
+		method = "text"
 
+	} else {
+		method = "rendered"
+	}
+	log.Println("Asking AI for ", method)
 	// Call Gemini with JSON schema
 	ctx := context.Background()
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
@@ -767,7 +791,7 @@ func whoTheyAre(initial bool, fileName string, sandboxDir string) (EmailAnalysis
 	return result, nil
 }
 
-func verifyCompany(db *sql.DB, whoTheyAreResult EmailAnalysis) (bool, error) {
+func verifyCompany(db *sql.DB, whoTheyAreResult EmailAnalysis, countryCode string) (bool, error) {
 	/* ---- check DB ---- */
 	q, err := db.Query(`SELECT domain FROM websites WHERE item_label = ?`, whoTheyAreResult.OrganizationFound)
 	if err != nil {
@@ -789,7 +813,7 @@ func verifyCompany(db *sql.DB, whoTheyAreResult EmailAnalysis) (bool, error) {
 	}
 
 	/* ---- Google fallback ---- */
-	body, err := searchGoogle(whoTheyAreResult.OrganizationName + " " + Email.Domain)
+	body, err := searchGoogle(whoTheyAreResult.OrganizationName+" "+Email.Domain, countryCode)
 	if err != nil {
 		return false, err
 	}
@@ -811,12 +835,51 @@ func verifyCompany(db *sql.DB, whoTheyAreResult EmailAnalysis) (bool, error) {
 	return linkDomain == Email.Domain, nil
 }
 
-func searchGoogle(searchTerm string) ([]byte, error) {
+type GeoIPResponse struct {
+	CountryCode string `json:"countryCode"`
+	Status      string `json:"status"`
+}
+
+func getCountryCodeFromIP(ip string) (string, error) {
+	if ip == "127.0.0.1" || ip == "::1" {
+		return "gb", nil // Default for local testing
+	}
+
+	resp, err := http.Get("http://ip-api.com/json/" + ip + "?fields=status,countryCode")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var geoResponse GeoIPResponse
+	if err := json.NewDecoder(resp.Body).Decode(&geoResponse); err != nil {
+		return "", err
+	}
+
+	if geoResponse.Status != "success" {
+		return "", fmt.Errorf("GeoIP API failed for IP %s", ip)
+	}
+
+	return strings.ToLower(geoResponse.CountryCode), nil
+}
+
+func getIPAddress(r *http.Request) string {
+	// Check the X-Forwarded-For header first
+	ip := r.Header.Get("X-Forwarded-For")
+	if ip != "" {
+		// This header can contain a comma-separated list of IPs; the first one is the client's.
+		return strings.Split(ip, ",")[0]
+	}
+	// Fallback to RemoteAddr
+	ip, _, _ = net.SplitHostPort(r.RemoteAddr)
+	return ip
+}
+func searchGoogle(searchTerm string, countryCode string) ([]byte, error) {
 	escaped := url.QueryEscape(searchTerm)
 	req, err := http.NewRequest("GET",
 		"https://www.googleapis.com/customsearch/v1?key="+googleSearchAPIKey+
 			"&cx="+googleSearchCX+
-			"&q="+escaped, nil)
+			"&q="+escaped+"&gl="+countryCode, nil)
 	if err != nil {
 		return []byte(""), err
 	}
