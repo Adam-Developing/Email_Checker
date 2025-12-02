@@ -1,0 +1,56 @@
+{
+  "name": "Email Spam Detector",
+  "version": "1.0",
+  "manifest_version": 3,
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "options_page": "options.html",
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mail.google.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "injected-styles.css"
+      ]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "analysis-ui.html",
+        "core/shared-styles.css",
+        "core/analysis-ui-flow.js",
+        "core/analysis-core.js"
+      ],
+      "matches": [
+        "https://mail.google.com/*"
+      ]
+    }
+  ],
+  "permissions": [
+    "identity",
+    "tabs",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://mail.google.com/",
+    "https://www.googleapis.com/",
+    "http://127.0.0.1:8080/"
+  ],
+  "oauth2": {
+    "client_id": "512828923789-k8hju3dcb2lkginpllc9cso8gsedubn0.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/gmail.readonly"
+    ]
+  }
+}

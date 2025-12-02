@@ -1,2 +1,3 @@
 /target
-/.env
+/Backend/.env
+/Frontend/chrome-extension/manifest.json

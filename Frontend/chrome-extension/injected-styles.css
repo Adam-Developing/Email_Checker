@@ -1,0 +1,84 @@
+/* Modal container that covers the whole screen */
+.analysis-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.6);
+    z-index: 10000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+/* The actual modal window */
+.analysis-modal-content {
+    background: #f7f9fc;
+    border-radius: 8px;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+    width: 90%;
+    max-width: 600px;
+    max-height: 90vh;
+    overflow-y: auto;
+    position: relative;
+}
+
+/* Close button for the modal */
+.analysis-modal-close {
+    position: absolute;
+    top: 10px;
+    right: 15px;
+    font-size: 28px;
+    font-weight: bold;
+    color: #888;
+    cursor: pointer;
+}
+.analysis-modal-close:hover {
+    color: #333;
+}
+
+/* Style for the score circle */
+.email-score-circle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    color: white;
+    font-weight: bold;
+    font-size: 14px;
+    margin-left: 10px;
+    cursor: pointer;
+    vertical-align: middle;
+}
+
+.email-score-circle.loading {
+    background-color: #ccc;
+    animation: pulse 1.5s infinite;
+}
+
+.email-score-circle.low-score {
+    background-color: #d94848; /* Red */
+}
+
+.email-score-circle.medium-score {
+    background-color: #f5a623; /* Orange */
+}
+
+.email-score-circle.high-score {
+    background-color: #0d8a4f; /* Green */
+}
+
+@keyframes pulse {
+    0% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.5;
+    }
+    100% {
+        opacity: 1;
+    }
+}

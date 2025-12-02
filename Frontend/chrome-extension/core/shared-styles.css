@@ -1,0 +1,261 @@
+.analysis-container {
+    padding: 10px;
+    border-radius: 12px;
+    width: 100%;
+}
+
+.analysis-container h3 {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 20px 0 10px 0;
+    color: #002B4D;
+}
+
+.verdict-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+    margin-bottom: 25px;
+}
+
+.verdict-card {
+    text-align: center;
+    padding: 15px;
+    border: 1px solid #e9ecef;
+    border-radius: 8px;
+    background-color: #fff;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.verdict-card h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0 0 10px 0;
+    color: #002B4D;
+}
+
+.progress-bar {
+    height: 12px;
+    background-color: #e9ecef;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.progress-bar-inner {
+    height: 100%;
+    border-radius: 6px;
+    transition: width 0.5s ease-in-out, background-color 0.5s ease;
+}
+
+.score-text {
+    font-size: 14px;
+    font-weight: 600;
+    color: #555;
+    margin-top: 8px;
+    transition: color 0.5s ease;
+}
+
+.score-text-disabled {
+    color: #999 !important;
+}
+
+.comparison-table {
+    width: 100%;
+    border-collapse: collapse;
+    background-color: #fff;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.comparison-table th, .comparison-table td {
+    padding: 14px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.comparison-table thead th {
+    background-color: #f7f9fc;
+    color: #002B4D;
+    font-weight: 600;
+}
+
+.comparison-table tbody tr:last-child td { border-bottom: none; }
+
+.comparison-table .category-title {
+    font-weight: 600;
+    color: #002B4D;
+    width: 120px;
+}
+
+/* Universal Checks section */
+.universal-checks-container {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    margin-top: 20px;
+}
+
+.universal-check-card {
+    padding: 15px;
+    border: 1px solid #e9ecef;
+    border-radius: 8px;
+    background-color: #fff;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.universal-check-card h4 {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0 0 10px 0;
+    color: #002B4D;
+}
+
+.disabled-check {
+    color: #777;
+    font-style: italic;
+}
+
+.comparison-table td > div, .universal-check-card > div {
+    opacity: 0;
+    transform: translateY(10px);
+    animation: fadeIn 0.5s forwards;
+}
+
+@keyframes fadeIn {
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.comparison-table p, .universal-check-card p { margin: 0; }
+
+.score-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 0.9em;
+    font-weight: 500;
+    margin-left: 8px;
+}
+
+.score-positive { background-color: #e6f9f0; color: #0d8a4f; }
+.score-negative { background-color: #fdeeee; color: #d94848; }
+
+.phone-list {
+    list-style: none;
+    padding-left: 0;
+    margin: 0;
+}
+.phone-list li {
+    margin-bottom: 4px;
+}
+
+.malicious-urls-list {
+    list-style: none;
+    padding-left: 0;
+    margin-top: 5px;
+}
+.malicious-urls-list li a {
+    color: #d94848;
+    word-break: break-all;
+}
+.malicious-urls-title {
+    font-weight: bold;
+    color: #d94848;
+}
+
+.loading-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-style: italic;
+    color: #888;
+    height: 40px;
+}
+
+.spinner {
+    border: 3px solid #f3f3f3;
+    border-top: 3px solid #3498db;
+    border-radius: 50%;
+    width: 16px;
+    height: 16px;
+    animation: spin 1s linear infinite;
+    margin-right: 8px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.url-scan-list {
+    list-style: none;
+    padding-left: 0;
+    margin-top: 10px;
+    font-size: 0.9em;
+}
+.url-scan-list li {
+    margin-bottom: 5px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    word-break: break-all;
+    animation: fadeIn 0.3s forwards;
+    opacity: 0;
+}
+.url-scan-list li a {
+    text-decoration: none;
+    color: inherit;
+}
+.url-scan-list li a:hover {
+    text-decoration: underline;
+}
+.url-safe {
+    background-color: #eef7ff;
+    border-left: 3px solid #3498db;
+}
+.url-malicious {
+    background-color: #fdeeee;
+    color: #d94848;
+    font-weight: 500;
+    border-left: 3px solid #d94848;
+}
+.url-error {
+    background-color: #fff8e1;
+    color: #f5a623;
+    border-left: 3px solid #f5a623;
+}
+
+.collapsible-header {
+    cursor: pointer;
+    position: relative;
+    padding-right: 25px; /* Make space for the arrow */
+    user-select: none; /* Prevent text selection on click */
+}
+
+/* Style for the arrow icon */
+.collapsible-header::after {
+    content: '▼'; /* Down arrow */
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 12px;
+    color: #555;
+    transition: transform 0.2s ease-out;
+}
+
+/* Rotate the arrow when the section is active/open */
+.collapsible-header.active::after {
+    transform: translateY(-50%) rotate(180deg); /* Up arrow */
+}
+
+/* The content panel, hidden by default */
+.collapsible-content {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease-out;
+    padding-left: 5px; /* Slight indent for the list */
+}
