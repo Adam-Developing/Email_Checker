@@ -469,10 +469,10 @@ The analysis uses a point-based scoring system where each check contributes to t
 - Verify OAuth client ID is correct in `manifest.json`
 
 **Authentication failing:**
-- Clear account authorization data in extension settings
-- Re-authorize with the correct Gmail account
+- Clear account authorisation data in extension settings
+- Re-authorise with the correct Gmail account
 - Ensure OAuth consent screen is configured in Google Cloud Console
 
 ## License
 
-This project is provided as-is for educational and personal use.
+This project is provided under the MIT license.
