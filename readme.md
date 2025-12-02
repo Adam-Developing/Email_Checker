@@ -202,11 +202,14 @@ The domain verification feature relies on a local SQLite database. You can eithe
    GOOGLE_SEARCH_API_KEY=your_google_search_api_key
    GOOGLE_SEARCH_CX=your_google_custom_search_engine_id
 
-   # Required: VirusTotal API key for URL scanning
+   # Required (if URL scanning enabled): VirusTotal API key for URL scanning
    VTotal_API_KEY=your_virustotal_api_key
 
-   # Optional: URLScan.io API key (alternative URL scanner)
+   # Optional: URLScan.io API key (additional URL scanner)
    URLSCAN_API_KEY=your_urlscan_api_key
+
+   # URL Scanning Master Switch: Set to TRUE to enable all URL scanning
+   # When FALSE, URL analysis is completely disabled
    URLSCAN_ENABLED=FALSE
 
    # Required: Main AI prompt (see .env.example for full prompt)
