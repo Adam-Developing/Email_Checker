@@ -1,5 +1,9 @@
 # Go Email Security Analyser
 
+| Spam Email | Real Email |
+| :---: | :---: |
+| <img width="1908" height="903" alt="Spam email" src="https://github.com/user-attachments/assets/fce655a5-16f3-43b9-9b35-408911667a2f" /> | <img width="1907" height="885" alt="Safe email" src="https://github.com/user-attachments/assets/f5854b8e-7a0a-4c43-b790-8ede98a94242" /> |
+
 This project is a Go-based web service designed to perform a deep, multi-faceted analysis of `.eml` files to identify phishing attempts, impersonation, and other security risks.
 
 It exposes a streaming API endpoint that accepts a raw email file and returns a series of JSON events detailing its findings, culminating in a final risk score. The analysis is performed by two parallel methods: one on the raw email content and another on a rendered, OCR-processed screenshot of the email, providing a robust defence against content-hiding techniques.
@@ -72,7 +76,11 @@ It exposes a streaming API endpoint that accepts a raw email file and returns a 
 
 6. Finally, two separate scores (one for the "normal" analysis and one for the "rendered" analysis) are calculated and sent.
 
-## System Dependencies
+
+## Project Setup
+
+
+### System Dependencies
 
 This application is not fully self-contained and relies on external command-line tools. You **must** have the following installed on the server and available in the system's `PATH`:
 
@@ -82,7 +90,6 @@ This application is not fully self-contained and relies on external command-line
 
 * [**Google Chrome**](https://www.google.com/chrome/)**:** Required for the headless browser rendering step.
 
-## Project Setup
 
 ### 1. Database Setup
 
@@ -124,8 +131,6 @@ GOOGLE_SEARCH_API_KEY=your_google_search_api_key
 GOOGLE_SEARCH_CX=your_google_custom_search_engine_id
 URLSCAN_API_KEY=your_urlscan.io_api_key
 Main_Prompt="Please identify the company they are pretending to be..."
-
-
 ```
 
 ### 3. Go Dependencies
@@ -134,8 +139,6 @@ Install the Go modules defined in `go.mod`:
 
 ```
 go mod tidy
-
-
 ```
 
 ### 4. Running the Server
@@ -144,8 +147,6 @@ Start the application from your terminal:
 
 ```
 go run .
-
-
 ```
 
 The server will start on port `8080`.
