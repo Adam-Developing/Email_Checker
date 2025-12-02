@@ -13,8 +13,21 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    
+    # Set the default working directory to Backend where go.mod is located
+    defaults:
+      run:
+        working-directory: ./Backend
+
     steps:
     - uses: actions/checkout@v4
+
+    - name: Install System Dependencies
+      # Install Tesseract OCR and ImageMagick as required by readme.md
+      # Chrome is pre-installed on ubuntu-latest runners
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y tesseract-ocr libtesseract-dev imagemagick
 
     - name: Set up Go
       uses: actions/setup-go@v4
