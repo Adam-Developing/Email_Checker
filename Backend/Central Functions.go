@@ -983,6 +983,9 @@ func searchGoogle(searchTerm string, countryCode string) ([]byte, error) {
 	}
 	client := newClientWithDefaultHeaders()
 	resp, err := client.Do(req)
+	if err != nil {
+		return []byte(""), err
+	}
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
@@ -990,12 +993,10 @@ func searchGoogle(searchTerm string, countryCode string) ([]byte, error) {
 		}
 	}(resp.Body)
 
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return []byte(""), err
+	if resp.StatusCode != http.StatusOK {
+		return []byte(""), fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
-	body, _ := io.ReadAll(resp.Body)
-
-	err = resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return []byte(""), err
 	}
@@ -1136,20 +1137,16 @@ func getFinalURL(ctx context.Context, start string) (string, error) {
 	client.Timeout = 15 * time.Second
 
 	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
 			log.Printf("Error closing response body: %v", err)
 		}
 	}(resp.Body)
-	if err != nil {
-		return "", err
-	}
 	_, err = io.Copy(io.Discard, resp.Body)
-	if err != nil {
-		return "", err
-	}
-	err = resp.Body.Close()
 	if err != nil {
 		return "", err
 	}

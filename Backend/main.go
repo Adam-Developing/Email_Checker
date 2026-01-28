@@ -419,6 +419,7 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 	db, err := sql.Open("sqlite", "wikidata_websites4.db")
 	if err != nil {
 		log.Printf("Database connection failed: %v", err)
+		close(resultsChan)
 		close(eventChan)
 		return
 	}
