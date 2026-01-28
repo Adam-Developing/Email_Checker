@@ -255,7 +255,17 @@ func OCRImage(fileNameImage string) string {
 
 	// Prepare the command to run Tesseract. The "stdout" argument tells
 	// Tesseract to print its output to the console instead of a file.
-	cmd := exec.Command("tesseract", fileNameImage, "stdout")
+	dir, err := os.Getwd()
+	if err != nil {
+		log.Printf("Failed to get current directory: %v", err)
+		return ""
+	}
+
+	// 2. Build the full absolute path to tesseract.exe
+	tesseractPath := filepath.Join(dir, "tesseract.exe")
+
+	// 3. Use the absolute path in the command
+	cmd := exec.Command(tesseractPath, fileNameImage, "stdout")
 
 	// Run the command and capture the combined standard output and standard error.
 	output, err := cmd.CombinedOutput()

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
@@ -25,10 +24,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/agnivade/levenshtein"
 	"github.com/jaytaylor/html2text"
 	"github.com/jhillyerd/enmime"
-	"github.com/lithammer/fuzzysearch/fuzzy"
 	"github.com/nyaruka/phonenumbers"
 	"golang.org/x/net/context"
 	"golang.org/x/net/html"
@@ -80,6 +80,11 @@ type GoogleSearchResult struct {
 	} `json:"items"`
 }
 
+type LinkData struct {
+	URL  string
+	Text string
+}
+
 // Verdict holds the processed result from a urlscan.io check
 type Verdict struct {
 	Score           int      `json:"score"`           // The raw overall score from urlscan (e.g., -100 to 100)
@@ -118,7 +123,12 @@ func cutHTML(src string) string {
 func updateEMLUniversal(outPath string, env *enmime.Envelope, newPlain, newHTML string) error {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
-
+	defer func(writer *multipart.Writer) {
+		err := writer.Close()
+		if err != nil {
+			log.Printf("Error closing writer: %v", err)
+		}
+	}(writer)
 	// --- Step 1: Gather all non-body parts ---
 	inlines := env.Inlines
 	attachments := env.Attachments
@@ -575,7 +585,16 @@ func convertImageToJPG(inputPath string) error {
 
 	fmt.Printf("Converting '%s' using ImageMagick...\n", inputPath)
 
-	cmd := exec.Command("magick", inputPath, newFilePath)
+	wd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %v", err)
+	}
+
+	// 2. Build absolute path to magick.exe
+	magickPath := filepath.Join(wd, "magick.exe")
+
+	// 3. Use the absolute path
+	cmd := exec.Command(magickPath, inputPath, newFilePath)
 
 	// Run the command and capture any output (including errors).
 	output, err := cmd.CombinedOutput()
@@ -599,78 +618,145 @@ func convertImageToJPG(inputPath string) error {
 	return nil
 }
 
-func checkDomainReal(db *sql.DB, domainReal string) (int, string, error) {
-	// 0 = false (domain is a look-alike)
-	// 1 = true (domain is real or benign typo)
-	// 2 = error (e.g. database query failure) or domain is not in the database with no close matches
+func checkDomainReal(db *sql.DB, rawInput string) (int, string, error) {
+	// 0 = Phishing
+	// 1 = Safe
+	// 2 = Unknown
 
-	// Note: this function does not check for subdomains, only the main domain.
-	//       It is assumed that the domain has been normalised to its effective TLD+
-	//       (e.g. example.com, not www.example.com or sub.example.com).
+	// --- STEP 1: Normalisation ---
+	rawInput = strings.TrimSpace(strings.ToLower(rawInput))
 
-	// TODO This does not factor in subdomains or domain endings like .com, .net, etc.
-
-	// 1) Normalise (IDN → ASCII, lower-case)
-	ascii, err := idna.Lookup.ToASCII(strings.ToLower(domainReal))
+	asciiInput, err := idna.ToASCII(rawInput)
 	if err != nil {
-		ascii = strings.ToLower(domainReal) // fallback
+		asciiInput = rawInput
 	}
 
-	// 2) Exact-match check
-	var cnt int
-	err = db.QueryRow(
-		`SELECT COUNT(domain) FROM websites WHERE domain = ?`,
-		ascii,
-	).Scan(&cnt)
-	if err != nil {
-		return 0, "", err
+	unicodeFull, _ := idna.ToUnicode(asciiInput)
+
+	eTLD, _ := publicsuffix.EffectiveTLDPlusOne(asciiInput)
+	if eTLD == "" {
+		eTLD = asciiInput
 	}
-	if cnt > 0 {
-		return 1, ascii, nil
+	asciiSLD := strings.Split(eTLD, ".")[0]
+	unicodeSLD, _ := idna.ToUnicode(asciiSLD)
+
+	// --- STEP 2: Allow List & Exact Match ---
+	var exists string
+	err = db.QueryRow(`
+       SELECT domain FROM websites WHERE domain = ? 
+       UNION 
+       SELECT word FROM allow_list WHERE word = ?`,
+		asciiInput, asciiSLD).Scan(&exists)
+
+	if err == nil {
+		return 1, exists, nil
+	} else if err != sql.ErrNoRows {
+		return 2, "", err
 	}
 
-	// 3) Compute a sensible Levenshtein threshold
-	//    ≤1 for names <8 chars, ≤2 for 8–12, ~15% for >12
-	var thresh int
-	l := len(ascii)
-	switch {
-	case l <= 11:
-		thresh = 1
-	case l <= 15:
-		thresh = 2
-	default:
-		thresh = int(math.Ceil(float64(l) * 0.15))
+	// --- STEP 3: Protected Brand Analysis ---
+
+	// STRATEGY A: High-Confidence Token Match
+	// Requirement: Brand + Suspicious Keyword must exist.
+	// EXCEPTION: If a "Safe Context" keyword exists, we treat it as Unknown (2).
+
+	suspiciousKeywords := []string{"login", "secure", "account", "update", "verify", "signin", "banking", "service"}
+	safeContexts := []string{"review", "reviews", "blog", "news", "forum", "help", "guide", "fan", "community"}
+
+	tokens := strings.FieldsFunc(unicodeFull, func(r rune) bool {
+		return r == '.' || r == '-' || r == '_' || (r >= '0' && r <= '9')
+	})
+
+	hasSuspiciousKeyword := false
+	hasSafeContext := false
+
+	for _, t := range tokens {
+		// Check for suspicious keywords
+		if !hasSuspiciousKeyword {
+			for _, kw := range suspiciousKeywords {
+				if t == kw {
+					hasSuspiciousKeyword = true
+					break
+				}
+			}
+		}
+		// Check for safe contexts (to exonerate the domain)
+		if !hasSafeContext {
+			for _, safe := range safeContexts {
+				if t == safe {
+					hasSafeContext = true
+					break
+				}
+			}
+		}
 	}
 
-	// 4) Fetch all domains from the database
-	rows, err := db.Query("SELECT domain FROM websites")
+	// Only flag as Phishing if Suspicious KW is present AND Safe Context is NOT.
+	if hasSuspiciousKeyword && !hasSafeContext {
+		rows, err := db.Query("SELECT sld FROM protected_brands WHERE ? LIKE '%' || sld || '%'", unicodeFull)
+		if err != nil {
+			return 2, "", err
+		}
+
+		for rows.Next() {
+			var brand string
+			if err := rows.Scan(&brand); err != nil {
+				continue
+			}
+			brandUni, _ := idna.ToUnicode(brand)
+
+			for _, token := range tokens {
+				if token == brandUni {
+					err := rows.Close()
+					if err != nil {
+						return 0, "", err
+					}
+					return 0, brand, nil // Phishing: Brand + Suspicious + No Safe Context
+				}
+			}
+		}
+		err = rows.Close()
+		if err != nil {
+			return 0, "", err
+		}
+	}
+
+	// STRATEGY B: Strict Typo Check (SLD Only)
+	// Requirement: Distance <= 1 AND Input is NOT a dictionary word.
+
+	inputLen := utf8.RuneCountInString(unicodeSLD)
+	rows, err := db.Query("SELECT sld FROM protected_brands WHERE LENGTH(sld) BETWEEN ? AND ?", inputLen-1, inputLen+1)
 	if err != nil {
 		return 2, "", err
 	}
 	defer func(rows *sql.Rows) {
-		if err := rows.Close(); err != nil {
-			log.Printf("warning: closing domain rows failed: %v", err)
+		err := rows.Close()
+		if err != nil {
+			log.Printf("warning: closing protected brand rows failed: %v", err)
 		}
 	}(rows)
 
-	// 5) Single pass: compute edit distance only on this tiny subset
 	for rows.Next() {
-		var dbDomain string
-		if err := rows.Scan(&dbDomain); err != nil {
-			return 2, "", err
+		var brand string
+		if err := rows.Scan(&brand); err != nil {
+			continue
 		}
-		lower := strings.ToLower(dbDomain)
-		if fuzzy.LevenshteinDistance(ascii, lower) <= thresh {
-			// found a look-alike
-			return 0, dbDomain, nil
+
+		brandUni, _ := idna.ToUnicode(brand)
+		dist := levenshtein.ComputeDistance(unicodeSLD, brandUni)
+
+		if dist == 1 {
+			// SAFETY CHECK: Dictionary Guard
+			var isDictionaryWord string
+			err := db.QueryRow("SELECT word FROM allow_list WHERE word = ?", unicodeSLD).Scan(&isDictionaryWord)
+
+			if err == sql.ErrNoRows {
+				return 0, brand, nil // Phishing (Typo and not a real word)
+			}
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return 2, "", err
 	}
 
-	// 6) No close matches → treat as real (or benign typo)
-	return 2, ascii, nil
+	return 2, asciiInput, nil
 }
 
 func whoTheyAre(initial bool, fileName string, sandboxDir string, Email EmailData, screenshotFileName string) (EmailAnalysis, error) {
@@ -784,7 +870,7 @@ func whoTheyAre(initial bool, fileName string, sandboxDir string, Email EmailDat
 		),
 	}
 
-	res, err := client.Models.GenerateContent(ctx, "gemini-2.0-flash", contents, cfg)
+	res, err := client.Models.GenerateContent(ctx, aiModel, contents, cfg)
 	if err != nil {
 		return EmailAnalysis{}, err
 	}
@@ -856,7 +942,12 @@ func getCountryCodeFromIP(ip string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Printf("Error closing response body: %v", err)
+		}
+	}(resp.Body)
 
 	var geoResponse GeoIPResponse
 	if err := json.NewDecoder(resp.Body).Decode(&geoResponse); err != nil {
@@ -892,6 +983,12 @@ func searchGoogle(searchTerm string, countryCode string) ([]byte, error) {
 	}
 	client := newClientWithDefaultHeaders()
 	resp, err := client.Do(req)
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Printf("Error closing response body: %v", err)
+		}
+	}(resp.Body)
 
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return []byte(""), err
@@ -1021,8 +1118,8 @@ func getURL(emailText string) []string {
 	urls := re.FindAllString(cleanedText, -1)
 
 	// Print the found URLs.
-	for _, url := range urls {
-		fmt.Println(url)
+	for _, emailURL := range urls {
+		fmt.Println(emailURL)
 	}
 	return urls
 }
@@ -1039,11 +1136,23 @@ func getFinalURL(ctx context.Context, start string) (string, error) {
 	client.Timeout = 15 * time.Second
 
 	resp, err := client.Do(req)
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Printf("Error closing response body: %v", err)
+		}
+	}(resp.Body)
 	if err != nil {
 		return "", err
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	_, err = io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		return "", err
+	}
+	err = resp.Body.Close()
+	if err != nil {
+		return "", err
+	}
 
 	// After redirects, this is the final URL
 	return resp.Request.URL.String(), nil
@@ -1070,7 +1179,12 @@ func checkURLs(ctx context.Context, u string) (*Verdict, error) {
 	if err != nil {
 		return nil, fmt.Errorf("execute search: %w", err)
 	}
-	defer searchResp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Printf("Error closing response body: %v", err)
+		}
+	}(searchResp.Body)
 
 	if searchResp.StatusCode == http.StatusOK {
 		var searchResult struct {
@@ -1128,7 +1242,12 @@ func checkURLs(ctx context.Context, u string) (*Verdict, error) {
 	if err != nil {
 		return nil, fmt.Errorf("submit scan: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Printf("Error closing response body: %v", err)
+		}
+	}(resp.Body)
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1178,13 +1297,19 @@ func checkURLs(ctx context.Context, u string) (*Verdict, error) {
 
 			if pollResp.StatusCode == http.StatusNotFound {
 				log.Printf("Scan for %s not ready, will poll again...", u)
-				pollResp.Body.Close()
+				err := pollResp.Body.Close()
+				if err != nil {
+					return nil, err
+				}
 				continue
 			}
 
 			if pollResp.StatusCode != http.StatusOK {
 				errBody, _ := io.ReadAll(pollResp.Body)
-				pollResp.Body.Close()
+				err := pollResp.Body.Close()
+				if err != nil {
+					return nil, err
+				}
 				return nil, fmt.Errorf("poll error: %s: %s", pollResp.Status, string(errBody))
 			}
 
@@ -1198,10 +1323,16 @@ func checkURLs(ctx context.Context, u string) (*Verdict, error) {
 				} `json:"verdicts"`
 			}
 			if err := json.NewDecoder(pollResp.Body).Decode(&result); err != nil {
-				pollResp.Body.Close()
+				err := pollResp.Body.Close()
+				if err != nil {
+					return nil, err
+				}
 				return nil, fmt.Errorf("decode final result: %w", err)
 			}
-			pollResp.Body.Close()
+			err = pollResp.Body.Close()
+			if err != nil {
+				return nil, err
+			}
 
 			log.Printf("Scan complete for %s. Score: %d. Platform Malicious: %t", u, result.Verdicts.Overall.Score, result.Verdicts.Overall.Malicious)
 
@@ -1254,7 +1385,12 @@ func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to query VT: %w", err)
 	}
-	defer res.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Printf("Error closing response body: %v", err)
+		}
+	}(res.Body)
 
 	// --- PATH A: Existing Report Found ---
 	if res.StatusCode == http.StatusOK {
@@ -1319,7 +1455,12 @@ func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to submit URL: %w", err)
 		}
-		defer submitRes.Body.Close()
+		defer func(Body io.ReadCloser) {
+			err := Body.Close()
+			if err != nil {
+				log.Printf("Error closing response body: %v", err)
+			}
+		}(submitRes.Body)
 
 		if submitRes.StatusCode != http.StatusOK && submitRes.StatusCode != http.StatusCreated {
 			b, _ := io.ReadAll(submitRes.Body)
@@ -1362,7 +1503,10 @@ func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
 
 				// Read body explicitly to handle closing
 				bodyBytes, _ := io.ReadAll(pollRes.Body)
-				pollRes.Body.Close()
+				err = pollRes.Body.Close()
+				if err != nil {
+					return nil, err
+				}
 
 				if pollRes.StatusCode == http.StatusNotFound {
 					log.Printf("analysis not ready, retrying...")
@@ -1450,4 +1594,75 @@ func analyseForExecutables(env *enmime.Envelope) (found bool, message string) {
 		}
 	}
 	return false, "No dangerous attachments found."
+}
+
+func isSensitiveURL(linkUrl, linkText string) bool {
+	combined := strings.ToLower(linkUrl + " " + linkText)
+
+	keywords := []string{
+		// Unsubscribe & Preferences
+		"unsubscribe", "opt-out", "optout", "subscription", "preferences",
+
+		// Account Security & Verification
+		"activate", "activation", "verify", "verification",
+		"confirm", "confirmation", "reset password", "change password",
+		"recover account", "unlock",
+
+		// Authentication (Magic Links)
+		"magic link", "instant login", "auto-login", "one-time",
+
+		// Workflow & Approvals
+		"approve", "reject", "accept", "decline", "authorize", "consent",
+		"invitation", "join team",
+
+		// Destructive Actions
+		"delete", "cancel", "remove", "terminate", "downgrade",
+
+		// Financial & Commerce
+		"pay now", "invoice", "checkout", "billing", "purchase",
+	}
+
+	for _, kw := range keywords {
+		if strings.Contains(combined, kw) {
+			fmt.Printf("Sensitive URL detected: %s %s\n", linkUrl, linkText)
+			return true
+		}
+	}
+	return false
+}
+
+// Add this function to extract URLs + Anchor Text
+func extractLinksFromHTML(htmlStr string) []LinkData {
+	var links []LinkData
+	doc, err := html.Parse(strings.NewReader(htmlStr))
+	if err != nil {
+		return links
+	}
+	var f func(*html.Node)
+	f = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "a" {
+			var href string
+			for _, a := range n.Attr {
+				if a.Key == "href" {
+					href = a.Val
+					break
+				}
+			}
+			if href != "" {
+				text := ""
+				// Basic text extraction from the anchor tag
+				for c := n.FirstChild; c != nil; c = c.NextSibling {
+					if c.Type == html.TextNode {
+						text += c.Data
+					}
+				}
+				links = append(links, LinkData{URL: href, Text: strings.TrimSpace(text)})
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			f(c)
+		}
+	}
+	f(doc)
+	return links
 }

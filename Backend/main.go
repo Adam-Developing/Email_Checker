@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 	"github.com/jhillyerd/enmime"
 	"golang.org/x/net/context"
 	"golang.org/x/net/html"
+	"golang.org/x/term"
 
 	_ "github.com/glebarez/sqlite"
 	"github.com/joho/godotenv"
@@ -125,10 +127,12 @@ func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 }
 
 func init() {
+	setupDependencies()
 	if err := godotenv.Load(); err != nil {
 		log.Printf(".env file not found: %v\n", err)
 	}
 	geminiKey = os.Getenv("GEMINI_API_KEY")
+	aiModel = os.Getenv("AI_MODEL")
 	googleSearchAPIKey = os.Getenv("GOOGLE_SEARCH_API_KEY")
 	googleSearchCX = os.Getenv("GOOGLE_SEARCH_CX")
 	mainPrompt = os.Getenv("Main_Prompt")
@@ -137,8 +141,42 @@ func init() {
 	isURLScanEnabled = os.Getenv("URLSCAN_ENABLED") == "TRUE"
 }
 
+func askForConfirmation(question string) bool {
+	// If an environment variable explicitly requests automatic installs, honor it.
+	if strings.ToLower(strings.TrimSpace(os.Getenv("AUTO_INSTALL_DEPS"))) == "true" {
+		log.Printf("AUTO_INSTALL_DEPS=true - auto-confirming: %s", question)
+		return true
+	}
+
+	// If not running interactively, do not block; default to not installing.
+	if !isInteractive() {
+		log.Printf("Non-interactive environment - skipping prompt for: %s", question)
+		return false
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Printf("%s [y/N]: ", question)
+
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		return false
+	}
+
+	response = strings.ToLower(strings.TrimSpace(response))
+	return response == "y" || response == "yes"
+}
+
+// isInteractive reports whether stdin is a terminal. If false, prompts should not be used.
+func isInteractive() bool {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		return true
+	}
+	return false
+}
+
 var (
 	geminiKey          string
+	aiModel            string
 	googleSearchAPIKey string
 	googleSearchCX     string
 	mainPrompt         string
@@ -148,6 +186,26 @@ var (
 )
 
 var emailPath = "TestEmails"
+
+// appointmentDomains is a slice of sender domains that are known to send
+// appointment/booking notifications. Add domains here to update behavior.
+var appointmentDomains = []string{
+	"email.ola.godaddy.com",
+}
+
+// appointmentMessage is shown when an email is from one of the appointmentDomains.
+const appointmentMessage = "This email is designed for recipients who have booked an appointment on a website. If you have not made an appointment or booking, please be cautious when clicking links or opening attachments."
+
+// domainInList is a small helper to check if a domain exists in a slice (case-insensitive)
+func domainInList(domain string, list []string) bool {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	for _, d := range list {
+		if strings.ToLower(strings.TrimSpace(d)) == domain {
+			return true
+		}
+	}
+	return false
+}
 
 func verifyStartupRequirements() error {
 	var issues []string
@@ -193,7 +251,7 @@ func verifyStartupRequirements() error {
 		alias  []string
 		reason string
 	}{
-		{"tesseract", nil, "Tesseract OCR"},
+		{"tesseract", []string{"tesseract.exe"}, "Tesseract OCR"},
 		{"magick", []string{"magick.exe"}, "ImageMagick"},
 		//{"chrome", []string{"google-chrome", "chromium", "msedge", "chrome.exe", "msedge.exe"}, "Chromium-based browser for chromedp"},
 	}
@@ -211,10 +269,13 @@ func verifyStartupRequirements() error {
 
 func commandExists(names ...string) bool {
 	for _, name := range names {
-		if name == "" {
-			continue
-		}
+		// 1. Check system PATH
 		if _, err := exec.LookPath(name); err == nil {
+			return true
+		}
+
+		// 2. Check current working directory explicitly
+		if _, err := os.Stat(name); err == nil {
 			return true
 		}
 	}
@@ -278,9 +339,19 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// defer to GUARANTEE the entire sandbox is deleted when the handler finishes.
-	defer os.RemoveAll(sandboxDir)
+	defer func(path string) {
+		err := os.RemoveAll(path)
+		if err != nil {
+			log.Printf("Error removing sandbox dir: %v", err)
+		}
+	}(sandboxDir)
 
-	defer r.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Printf("Error closing request body: %v", err)
+		}
+	}(r.Body)
 	emlData, err := base64.StdEncoding.DecodeString(string(base64Data))
 	if err != nil {
 		log.Printf("Error decoding base64 data: %v", err)
@@ -319,8 +390,14 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Error marshalling event data for %s: %v", event.EventName, err)
 				continue
 			}
-			fmt.Fprintf(w, "event: %s\n", event.EventName)
-			fmt.Fprintf(w, "data: %s\n\n", jsonData)
+			_, err = fmt.Fprintf(w, "event: %s\n", event.EventName)
+			if err != nil {
+				log.Printf("Error writing event name for %s: %v", event.EventName, err)
+			}
+			_, err = fmt.Fprintf(w, "data: %s\n\n", jsonData)
+			if err != nil {
+				log.Printf("Error writing event data for %s: %v", event.EventName, err)
+			}
 			flusher.Flush()
 		}
 	}()
@@ -345,7 +422,12 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 		close(eventChan)
 		return
 	}
-	defer db.Close()
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Printf("Error closing database connection: %v", err)
+		}
+	}(db)
 
 	var totalDatabaseReadTimeNanos int64
 	// Legacy fields kept for backward compatibility
@@ -376,7 +458,12 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 	if enabledChecks["checkTextAnalysis"] {
 		analysisWg.Add(1)
 		activeChecks++
-		go performTextAnalysis(&analysisWg, resultsChan, fileName, db, &totalDatabaseReadTimeNanos, sandboxDir, countryCode, Email)
+		go func() {
+			err := performTextAnalysis(&analysisWg, resultsChan, fileName, db, &totalDatabaseReadTimeNanos, sandboxDir, countryCode, Email)
+			if err != nil {
+				log.Printf("Text analysis failed: %v", err)
+			}
+		}()
 	}
 	if enabledChecks["checkRenderedAnalysis"] {
 		analysisWg.Add(1)
@@ -424,6 +511,21 @@ func performDomainAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, db *sql.DB
 		"icloud.com":     {},
 		"protonmail.com": {},
 		"zoho.com":       {},
+		"mail.ru":        {},
+		// note: email.ola.godaddy.com intentionally removed from this free-mail list
+	}
+
+	// Special handling for appointment/booking notification domains
+	if domainInList(domain, appointmentDomains) {
+		result := DomainAnalysisResult{
+			Status:           "AppointmentNotification",
+			Message:          appointmentMessage,
+			MatchedDomain:    domain,
+			ScoreImpact:      0,
+			SuspectSubdomain: subdomain,
+		}
+		ch <- CheckResult{EventName: "domainAnalysis", Payload: result}
+		return // Exit early, skipping the database check
 	}
 
 	if _, isTrusted := trustedProviders[domain]; isTrusted {
@@ -517,17 +619,41 @@ func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan cha
 	ctx, cancel := context.WithTimeout(rCtx, 3*time.Minute)
 	defer cancel()
 	// (URL extraction logic)
-	initialURLs := append(getURL(Email.HTML), getURL(Email.Text)...)
-	ignoredExtensions := map[string]struct{}{".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {}, ".webp": {}, ".css": {}, ".svg": {}, ".woff": {}, ".woff2": {}, ".ttf": {}, ".js": {}}
 	uniqueURLs := make(map[string]struct{})
-	for _, u := range initialURLs {
-		decodedURL := html.UnescapeString(strings.TrimSpace(u))
+	ignoredExtensions := map[string]struct{}{
+		".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {}, ".webp": {},
+		".css": {}, ".svg": {}, ".woff": {}, ".woff2": {}, ".ttf": {}, ".js": {},
+	}
+
+	// 1. Process HTML Links (with anchor text)
+	htmlLinks := extractLinksFromHTML(Email.HTML)
+	for _, l := range htmlLinks {
+		decodedURL := html.UnescapeString(strings.TrimSpace(l.URL))
+		if isSensitiveURL(decodedURL, l.Text) {
+			continue // Skip sensitive links
+		}
 		if parsedURL, err := url.Parse(decodedURL); err == nil {
 			if _, ignore := ignoredExtensions[strings.ToLower(filepath.Ext(parsedURL.Path))]; !ignore {
 				uniqueURLs[decodedURL] = struct{}{}
 			}
 		}
 	}
+
+	// 2. Process Plain Text Links (no anchor text)
+	textLinks := getURL(Email.Text)
+	for _, u := range textLinks {
+		decodedURL := html.UnescapeString(strings.TrimSpace(u))
+		// Pass empty string for text, checking URL only
+		if isSensitiveURL(decodedURL, "") {
+			continue
+		}
+		if parsedURL, err := url.Parse(decodedURL); err == nil {
+			if _, ignore := ignoredExtensions[strings.ToLower(filepath.Ext(parsedURL.Path))]; !ignore {
+				uniqueURLs[decodedURL] = struct{}{}
+			}
+		}
+	}
+
 	var finalURLsEmail []string
 	finalUniqueURLs := make(map[string]struct{})
 	for u := range uniqueURLs {
