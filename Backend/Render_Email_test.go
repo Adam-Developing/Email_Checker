@@ -13,9 +13,16 @@ func TestSanitizeEmailCSS(t *testing.T) {
 		notContains []string
 	}{
 		{
-			name:  "Remove obfuscated classes",
+			name:  "Remove obfuscated classes but preserve structure",
 			input: `<div class="obf-TForm obf-EmailCheckbox">Test</div>`,
 			notContains: []string{"obf-TForm", "obf-EmailCheckbox"},
+			contains: []string{"<div", ">Test</div>"},
+		},
+		{
+			name:  "Preserve non-obfuscated classes",
+			input: `<div class="normal-class obf-dangerous other-class">Content</div>`,
+			contains: []string{`class="normal-class other-class"`, "Content"},
+			notContains: []string{"obf-dangerous"},
 		},
 		{
 			name:  "Disable Outlook conditional comments",
@@ -27,13 +34,13 @@ func TestSanitizeEmailCSS(t *testing.T) {
 			name:  "Remove dangerous CSS properties - position fixed",
 			input: `<style>div{position:fixed;top:0;}</style>`,
 			notContains: []string{"position:fixed", "position: fixed"},
-			contains: []string{"/* removed */"},
+			contains: []string{"/* removed */", "<style>"},
 		},
 		{
 			name:  "Remove dangerous CSS properties - high z-index",
 			input: `<style>.modal{z-index:9999;}</style>`,
 			notContains: []string{"z-index:9999", "z-index: 9999"},
-			contains: []string{"/* removed */"},
+			contains: []string{"/* removed */", "<style>"},
 		},
 		{
 			name:  "Preserve safe content",
@@ -44,7 +51,13 @@ func TestSanitizeEmailCSS(t *testing.T) {
 			name:  "Handle mixed content",
 			input: `<div class="safe obf-Dangerous">Text</div><style>p{position:absolute;}</style>`,
 			notContains: []string{"obf-Dangerous", "position:absolute"},
-			contains: []string{"Text", "/* removed */"},
+			contains: []string{"Text", "/* removed */", `class="safe"`},
+		},
+		{
+			name:  "Remove entire class attribute if only obf classes",
+			input: `<div class="obf-only">Text</div>`,
+			notContains: []string{`class=`, "obf-only"},
+			contains: []string{"<div", ">Text</div>"},
 		},
 	}
 

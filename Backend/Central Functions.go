@@ -530,13 +530,13 @@ func saveRemoteImage(src string, i int, attachmentsDir string) {
 	}
 
 	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		if err != nil {
-			log.Printf("Failed to fetch remote image: %v", err)
-		}
+	if err != nil {
+		log.Printf("Failed to fetch remote image: %v", err)
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		log.Printf("Failed to fetch remote image, status code: %d", resp.StatusCode)
 		return
 	}
 	defer func(Body io.ReadCloser) {

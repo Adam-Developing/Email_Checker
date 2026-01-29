@@ -125,16 +125,42 @@ func sanitizeEmailCSS(htmlContent string) string {
 	htmlContent = strings.ReplaceAll(htmlContent, "<!--[if", "<!--[disabled if")
 	htmlContent = strings.ReplaceAll(htmlContent, "<![endif]-->", "<![disabled endif]-->")
 	
-	// Remove problematic obfuscated CSS class patterns from HTML attributes (e.g., class="obf-*")
-	obfAttrRegex := regexp.MustCompile(`class\s*=\s*["']?[^"']*obf-[^"']*["']?`)
-	htmlContent = obfAttrRegex.ReplaceAllString(htmlContent, "")
+	// Remove obfuscated class names from class attributes while preserving other classes
+	// This handles cases like class="normal-class obf-dangerous other-class"
+	classAttrRegex := regexp.MustCompile(`class\s*=\s*["']([^"']*)["']`)
+	htmlContent = classAttrRegex.ReplaceAllStringFunc(htmlContent, func(match string) string {
+		// Extract the class attribute value
+		submatches := classAttrRegex.FindStringSubmatch(match)
+		if len(submatches) < 2 {
+			return match
+		}
+		classValue := submatches[1]
+		
+		// Split into individual classes and filter out obf-* classes
+		classes := strings.Fields(classValue)
+		var cleanClasses []string
+		for _, class := range classes {
+			if !strings.HasPrefix(class, "obf-") {
+				cleanClasses = append(cleanClasses, class)
+			}
+		}
+		
+		// If all classes were removed, remove the entire attribute
+		if len(cleanClasses) == 0 {
+			return ""
+		}
+		
+		// Reconstruct the class attribute with cleaned classes
+		return fmt.Sprintf(`class="%s"`, strings.Join(cleanClasses, " "))
+	})
 	
 	// Remove obfuscated CSS rules from style blocks
-	// Match CSS rules with obf- selectors and remove the entire rule
-	obfRuleRegex := regexp.MustCompile(`(?m)[.#]obf-[\w-]+[^{]*\{[^}]*\}\s*`)
+	// Use (?s) for DOTALL mode to match newlines within rule bodies
+	obfRuleRegex := regexp.MustCompile(`(?s)[.#]obf-[\w-]+[^{]*\{[^}]*\}\s*`)
 	htmlContent = obfRuleRegex.ReplaceAllString(htmlContent, "")
 	
 	// Remove potentially dangerous CSS properties from style blocks
+	// z-index >= 1000 is considered dangerous as it may interfere with UI overlays
 	dangerousPropsRegex := regexp.MustCompile(`(?i)(position\s*:\s*fixed|position\s*:\s*absolute|z-index\s*:\s*\d{4,})`)
 	htmlContent = dangerousPropsRegex.ReplaceAllString(htmlContent, "/* removed */")
 	
