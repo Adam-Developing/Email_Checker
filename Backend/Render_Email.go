@@ -125,10 +125,14 @@ func sanitizeEmailCSS(htmlContent string) string {
 	htmlContent = strings.ReplaceAll(htmlContent, "<!--[if", "<!--[disabled if")
 	htmlContent = strings.ReplaceAll(htmlContent, "<![endif]-->", "<![disabled endif]-->")
 	
-	// Remove problematic obfuscated CSS class patterns (e.g., obf-*)
-	// These are often used in complex email clients and can interfere with rendering
-	obfRegex := regexp.MustCompile(`class\s*=\s*["']?[^"']*obf-[^"']*["']?`)
-	htmlContent = obfRegex.ReplaceAllString(htmlContent, "")
+	// Remove problematic obfuscated CSS class patterns from HTML attributes (e.g., class="obf-*")
+	obfAttrRegex := regexp.MustCompile(`class\s*=\s*["']?[^"']*obf-[^"']*["']?`)
+	htmlContent = obfAttrRegex.ReplaceAllString(htmlContent, "")
+	
+	// Remove obfuscated CSS rules from style blocks
+	// Match CSS rules with obf- selectors and remove the entire rule
+	obfRuleRegex := regexp.MustCompile(`(?m)[.#]obf-[\w-]+[^{]*\{[^}]*\}\s*`)
+	htmlContent = obfRuleRegex.ReplaceAllString(htmlContent, "")
 	
 	// Remove potentially dangerous CSS properties from style blocks
 	dangerousPropsRegex := regexp.MustCompile(`(?i)(position\s*:\s*fixed|position\s*:\s*absolute|z-index\s*:\s*\d{4,})`)
