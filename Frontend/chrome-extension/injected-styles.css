@@ -24,6 +24,13 @@
     position: relative;
 }
 
+/* Authentication modal specific styling */
+.auth-modal-content {
+    max-width: 450px;
+    padding: 20px;
+    text-align: center;
+}
+
 /* Close button for the modal */
 .analysis-modal-close {
     position: absolute;
@@ -36,6 +43,35 @@
 }
 .analysis-modal-close:hover {
     color: #333;
+}
+
+/* Button styles for authentication modal */
+.auth-button, .cancel-button {
+    padding: 10px 20px;
+    border-radius: 5px;
+    border: none;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    margin: 5px;
+}
+
+.auth-button {
+    background-color: #0d8a4f;
+    color: white;
+}
+
+.auth-button:hover {
+    background-color: #0a6e3f;
+}
+
+.cancel-button {
+    background-color: #ccc;
+    color: #333;
+}
+
+.cancel-button:hover {
+    background-color: #bbb;
 }
 
 /* Style for the score circle */

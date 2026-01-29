@@ -517,8 +517,7 @@ func saveRemoteImage(src string, i int, attachmentsDir string) {
 	var err error
 	u, err := url.Parse(src)
 	if err != nil {
-		log.Println("Invalid URL:", err)
-		// TODO handle error gracefully
+		log.Printf("Invalid URL for remote image: %v", err)
 		return
 	}
 
@@ -526,8 +525,7 @@ func saveRemoteImage(src string, i int, attachmentsDir string) {
 	client := newClientWithDefaultHeaders()
 	req, err := http.NewRequest("GET", src, nil)
 	if err != nil {
-		log.Println("Failed to create request:", err)
-		// TODO handle error gracefully
+		log.Printf("Failed to create request for remote image: %v", err)
 		return
 	}
 
@@ -535,6 +533,9 @@ func saveRemoteImage(src string, i int, attachmentsDir string) {
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
 			_ = resp.Body.Close()
+		}
+		if err != nil {
+			log.Printf("Failed to fetch remote image: %v", err)
 		}
 		return
 	}
@@ -546,6 +547,7 @@ func saveRemoteImage(src string, i int, attachmentsDir string) {
 
 	ct := resp.Header.Get("Content-Type")
 	if !strings.HasPrefix(ct, "image/") {
+		log.Printf("Remote resource is not an image: %s", ct)
 		return
 	}
 
@@ -561,8 +563,7 @@ func saveRemoteImage(src string, i int, attachmentsDir string) {
 	}
 
 	if err := os.WriteFile(filepath.Join(attachmentsDir, name), data, 0o644); err != nil {
-		log.Println("Failed to save remote image:", err)
-		// TODO handle error gracefully
+		log.Printf("Failed to save remote image to disk: %v", err)
 	}
 }
 
@@ -891,10 +892,8 @@ func verifyCompany(db *sql.DB, whoTheyAreResult EmailAnalysis, countryCode strin
 		return false, err
 	}
 	defer func(q *sql.Rows) {
-		err := q.Close()
-		if err != nil {
-			log.Fatal(err)
-			// TODO handle error gracefully
+		if cerr := q.Close(); cerr != nil {
+			log.Printf("Failed to close database query rows: %v", cerr)
 		}
 	}(q)
 	for q.Next() {

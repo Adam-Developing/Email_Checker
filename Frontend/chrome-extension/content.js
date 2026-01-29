@@ -311,10 +311,7 @@ if (window.top === window.self) {
             overlay = document.createElement('div');
             overlay.className = 'analysis-modal-overlay auth-modal-overlay';
             const content = document.createElement('div');
-            content.className = 'analysis-modal-content';
-            content.style.maxWidth = '450px';
-            content.style.padding = '20px';
-            content.style.textAlign = 'center';
+            content.className = 'analysis-modal-content auth-modal-content';
             const link = document.createElement('link');
             link.href = chrome.runtime.getURL('core/shared-styles.css');
             link.type = 'text/css';
@@ -335,14 +332,6 @@ if (window.top === window.self) {
             <button id="auth-modal-button" class="auth-button">Authenticate</button>
             <button id="auth-modal-cancel" class="cancel-button">Cancel</button>
         `;
-
-        const style = document.createElement('style');
-        style.textContent = `
-            .auth-button, .cancel-button { padding: 10px 20px; border-radius: 5px; border: none; font-size: 14px; font-weight: 600; cursor: pointer; margin: 5px; }
-            .auth-button { background-color: #0d8a4f; color: white; }
-            .cancel-button { background-color: #ccc; color: #333; }
-        `;
-        content.appendChild(style);
 
         content.querySelector('#auth-modal-button').onclick = () => {
             overlay.style.display = 'none';

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -117,9 +118,31 @@ func RenderEmailHTML(env *enmime.Envelope, fileName string, sandboxDir string) (
 	return screenshotFile, screenshotFileName // Return the name
 }
 
+// sanitizeEmailCSS removes potentially problematic CSS from email HTML
+// while preserving basic styling for proper rendering
+func sanitizeEmailCSS(htmlContent string) string {
+	// Remove Outlook-specific conditional comments and MSO classes
+	htmlContent = strings.ReplaceAll(htmlContent, "<!--[if", "<!--[disabled if")
+	htmlContent = strings.ReplaceAll(htmlContent, "<![endif]-->", "<![disabled endif]-->")
+	
+	// Remove problematic obfuscated CSS class patterns (e.g., obf-*)
+	// These are often used in complex email clients and can interfere with rendering
+	obfRegex := regexp.MustCompile(`class\s*=\s*["']?[^"']*obf-[^"']*["']?`)
+	htmlContent = obfRegex.ReplaceAllString(htmlContent, "")
+	
+	// Remove potentially dangerous CSS properties from style blocks
+	dangerousPropsRegex := regexp.MustCompile(`(?i)(position\s*:\s*fixed|position\s*:\s*absolute|z-index\s*:\s*\d{4,})`)
+	htmlContent = dangerousPropsRegex.ReplaceAllString(htmlContent, "/* removed */")
+	
+	return htmlContent
+}
+
 // rewriteHTMLForRendering finds cid: images, saves them, rewrites src attributes,
-// and ensures the HTML has a UTF-8 meta tag.
+// ensures the HTML has a UTF-8 meta tag, and sanitizes CSS.
 func rewriteHTMLForRendering(env *enmime.Envelope, tempDir string) (string, error) {
+	// Sanitize CSS in the HTML before processing
+	sanitizedHTML := sanitizeEmailCSS(env.HTML)
+	
 	// Create a map of Content-IDs to their corresponding email parts.
 	cidMap := make(map[string]*enmime.Part)
 	allParts := append(env.Inlines, env.Attachments...)
@@ -130,7 +153,7 @@ func rewriteHTMLForRendering(env *enmime.Envelope, tempDir string) (string, erro
 		}
 	}
 
-	doc, err := html.Parse(strings.NewReader(env.HTML))
+	doc, err := html.Parse(strings.NewReader(sanitizedHTML))
 	if err != nil {
 		return "", err
 	}
