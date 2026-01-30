@@ -983,6 +983,9 @@ func searchGoogle(searchTerm string, countryCode string) ([]byte, error) {
 	}
 	client := newClientWithDefaultHeaders()
 	resp, err := client.Do(req)
+	if err != nil {
+		return []byte(""), err
+	}
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
@@ -990,12 +993,10 @@ func searchGoogle(searchTerm string, countryCode string) ([]byte, error) {
 		}
 	}(resp.Body)
 
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return []byte(""), err
+	if resp.StatusCode != http.StatusOK {
+		return []byte(""), fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
-	body, _ := io.ReadAll(resp.Body)
-
-	err = resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return []byte(""), err
 	}
@@ -1136,20 +1137,16 @@ func getFinalURL(ctx context.Context, start string) (string, error) {
 	client.Timeout = 15 * time.Second
 
 	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
 			log.Printf("Error closing response body: %v", err)
 		}
 	}(resp.Body)
-	if err != nil {
-		return "", err
-	}
 	_, err = io.Copy(io.Discard, resp.Body)
-	if err != nil {
-		return "", err
-	}
-	err = resp.Body.Close()
 	if err != nil {
 		return "", err
 	}
@@ -1288,7 +1285,10 @@ func checkURLs(ctx context.Context, u string) (*Verdict, error) {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("polling cancelled: %w", ctx.Err())
 		case <-pollTicker.C:
-			pollReq, _ := http.NewRequestWithContext(ctx, "GET", submitResp.APIResultURL, nil)
+			pollReq, err := http.NewRequestWithContext(ctx, "GET", submitResp.APIResultURL, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create poll request: %w", err)
+			}
 			pollResp, err := c.Do(pollReq)
 			if err != nil {
 				log.Printf("Poll request failed (%s), retrying: %v", submitResp.APIResultURL, err)
@@ -1305,8 +1305,12 @@ func checkURLs(ctx context.Context, u string) (*Verdict, error) {
 			}
 
 			if pollResp.StatusCode != http.StatusOK {
-				errBody, _ := io.ReadAll(pollResp.Body)
-				err := pollResp.Body.Close()
+				errBody, err := io.ReadAll(pollResp.Body)
+				if err != nil {
+					log.Printf("Failed to read error response body: %v", err)
+					errBody = []byte("(unable to read error body)")
+				}
+				err = pollResp.Body.Close()
 				if err != nil {
 					return nil, err
 				}
@@ -1463,7 +1467,10 @@ func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
 		}(submitRes.Body)
 
 		if submitRes.StatusCode != http.StatusOK && submitRes.StatusCode != http.StatusCreated {
-			b, _ := io.ReadAll(submitRes.Body)
+			b, err := io.ReadAll(submitRes.Body)
+			if err != nil {
+				return nil, fmt.Errorf("submit error: %s (failed to read body: %v)", submitRes.Status, err)
+			}
 			return nil, fmt.Errorf("submit error: %s", string(b))
 		}
 
@@ -1502,7 +1509,12 @@ func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
 				}
 
 				// Read body explicitly to handle closing
-				bodyBytes, _ := io.ReadAll(pollRes.Body)
+				bodyBytes, err := io.ReadAll(pollRes.Body)
+				if err != nil {
+					log.Printf("Failed to read poll response body: %v", err)
+					_ = pollRes.Body.Close()
+					continue
+				}
 				err = pollRes.Body.Close()
 				if err != nil {
 					return nil, err

@@ -326,6 +326,13 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Initial file processing
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Printf("Error closing request body: %v", err)
+		}
+	}(r.Body)
+	
 	base64Data, err := io.ReadAll(r.Body)
 	if err != nil {
 		log.Printf("Error reading request body: %v", err)
@@ -346,12 +353,6 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}(sandboxDir)
 
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			log.Printf("Error closing request body: %v", err)
-		}
-	}(r.Body)
 	emlData, err := base64.StdEncoding.DecodeString(string(base64Data))
 	if err != nil {
 		log.Printf("Error decoding base64 data: %v", err)
@@ -419,6 +420,7 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 	db, err := sql.Open("sqlite", "wikidata_websites4.db")
 	if err != nil {
 		log.Printf("Database connection failed: %v", err)
+		close(resultsChan)
 		close(eventChan)
 		return
 	}
