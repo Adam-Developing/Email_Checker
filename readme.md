@@ -6,7 +6,7 @@
 
 A comprehensive email security analysis system consisting of a **Go-based backend server** and a **Chrome extension frontend**. The system performs deep, multi-faceted analysis of emails to identify phishing attempts, impersonation, and other security risks.
 
-The backend exposes a streaming API that accepts raw email data and returns real-time analysis results via Server-Sent Events (SSE). The Chrome extension integrates directly with Gmail to provide seamless email analysis within your inbox.
+The backend exposes a streaming API that accepts raw email data and returns real-time analysis results via Server-Sent Events (SSE). The Chrome extension integrates directly with **Gmail** and **Microsoft Outlook (web)** to provide seamless email analysis within your inbox.
 
 ## Table of Contents
 
@@ -50,7 +50,7 @@ The backend exposes a streaming API that accepts raw email data and returns real
 
 * **Image Processing:** Downloads remote and inline images, converting them to JPG using ImageMagick for consistent processing.
 
-* **Gmail Integration:** Chrome extension provides seamless integration with Gmail, displaying analysis scores directly in your inbox.
+* **Multi-Platform Support:** Chrome extension provides seamless integration with both **Gmail** and **Microsoft Outlook (web)**, displaying analysis scores directly in your inbox.
 
 ## How It Works
 
@@ -88,9 +88,11 @@ The backend exposes a streaming API that accepts raw email data and returns real
 
 ### Chrome Extension Flow
 
-1. User opens an email in Gmail.
+1. User opens an email in **Gmail** or **Microsoft Outlook (web)**.
 
-2. The extension detects the email and (after authentication) fetches the raw email data via Gmail API.
+2. The extension detects the email and (after authentication) fetches the raw email data:
+   - **Gmail**: Via Gmail API
+   - **Outlook**: Via Microsoft Graph API
 
 3. The raw email is sent to the backend server for analysis.
 
@@ -258,7 +260,8 @@ curl http://localhost:8080/process-eml-stream
 
 - Google Chrome browser (or Chromium-based browser)
 - Backend server running on `http://127.0.0.1:8080`
-- A Google Cloud Project with OAuth 2.0 credentials
+- A Google Cloud Project with OAuth 2.0 credentials (for Gmail support)
+- A Microsoft Azure account with app registration (for Outlook support - optional)
 
 ### Installation
 
@@ -272,7 +275,7 @@ curl http://localhost:8080/process-eml-stream
    cp manifest.example.json manifest.json
    ```
 
-3. **Configure OAuth credentials:**
+3. **Configure Gmail OAuth credentials:**
 
    Edit `manifest.json` and update the `oauth2` section with your own Google Cloud OAuth client ID:
 
@@ -294,6 +297,22 @@ curl http://localhost:8080/process-eml-stream
    5. Select **Chrome Extension** as the application type
    6. Enter your extension's ID (you'll get this after loading the extension once)
    7. Copy the Client ID and paste it into `manifest.json`
+
+3b. **Configure Outlook OAuth credentials (Optional):**
+
+   For Outlook support, you'll also need to configure Microsoft Azure OAuth. Edit `manifest.json` and update the `outlook_oauth2` section:
+
+   ```json
+   "outlook_oauth2": {
+     "client_id": "YOUR_MICROSOFT_CLIENT_ID_HERE",
+     "scopes": [
+       "Mail.Read",
+       "offline_access"
+     ]
+   }
+   ```
+
+   **📖 For detailed Outlook setup instructions, see [OUTLOOK_SETUP.md](Frontend/chrome-extension/OUTLOOK_SETUP.md)**
 
 4. **Load the extension in Chrome:**
 
@@ -321,7 +340,7 @@ Access extension settings by:
 |---------|-------------|
 | **Analysis Mode** | `Auto` - Automatically analyze emails when opened<br>`Manual` - Click a button to analyze |
 | **Enabled Checks** | Toggle individual analysis checks on/off |
-| **Account Authorization** | Manage Gmail account permissions |
+| **Account Authorization** | Manage Gmail and Outlook account permissions |
 
 **Configurable Checks:**
 - ✅ Sender Domain Analysis
@@ -334,13 +353,15 @@ Access extension settings by:
 
 1. **Ensure the backend server is running** on `http://127.0.0.1:8080`
 
-2. **Open Gmail** in Chrome
+2. **Open Gmail or Outlook web** in Chrome
+   - Gmail: [https://mail.google.com](https://mail.google.com)
+   - Outlook: [https://outlook.live.com](https://outlook.live.com) or [https://outlook.office365.com](https://outlook.office365.com)
 
 3. **Click on any email** to view it
 
 4. **Authenticate** (first time only):
-   - A modal will appear asking for Gmail read access
-   - Click **Authenticate** and sign in with your Google account
+   - A modal will appear asking for email read access
+   - Click **Authenticate** and sign in with your account
    - Grant the extension read-only access to your emails
 
 5. **View analysis results:**
