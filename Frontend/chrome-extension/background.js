@@ -311,7 +311,10 @@ async function fetchRawMessageOutlook(messageId, token) {
     const mimeContent = await response.text();
     
     // Convert to base64 (same format as Gmail)
-    const base64 = btoa(unescape(encodeURIComponent(mimeContent)));
+    // Use TextEncoder for proper UTF-8 encoding
+    const encoder = new TextEncoder();
+    const uint8Array = encoder.encode(mimeContent);
+    const base64 = btoa(String.fromCharCode.apply(null, uint8Array));
     
     return base64;
 }

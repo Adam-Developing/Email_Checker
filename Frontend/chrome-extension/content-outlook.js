@@ -2,6 +2,9 @@
 
 if (window.top === window.self) {
 
+    // Constants
+    const EMAIL_REGEX = /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/;
+
     let analyzedMessageIds = new Set();
     let currentMessageId = null;
     let currentUserEmail = null;
@@ -117,13 +120,13 @@ if (window.top === window.self) {
         if (meButton) {
             const email = meButton.getAttribute('aria-label');
             if (email && email.includes('@')) {
-                const match = email.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/);
+                const match = email.match(EMAIL_REGEX);
                 if (match) return match[1].toLowerCase();
             }
         }
 
         // Try from page title or other elements
-        const titleMatch = document.title.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/);
+        const titleMatch = document.title.match(EMAIL_REGEX);
         if (titleMatch) return titleMatch[1].toLowerCase();
 
         // Try meta tags
