@@ -1,13 +1,25 @@
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    // 1. Silent Check (Auto-analysis)
+    // 1. Silent Check (Auto-analysis) - Gmail
     if (request.type === 'GET_RAW_MESSAGE') {
         handleGetRawMessage(request, sender);
         return true;
     }
 
-    // 2. Interactive Trigger (User clicked "Authenticate")
+    // 2. Interactive Trigger (User clicked "Authenticate") - Gmail
     if (request.type === 'TRIGGER_INTERACTIVE_AUTH') {
         handleInteractiveAuth(request, sender);
+        return true;
+    }
+
+    // 3. Silent Check (Auto-analysis) - Outlook
+    if (request.type === 'GET_RAW_MESSAGE_OUTLOOK') {
+        handleGetRawMessageOutlook(request, sender);
+        return true;
+    }
+
+    // 4. Interactive Trigger (User clicked "Authenticate") - Outlook
+    if (request.type === 'TRIGGER_INTERACTIVE_AUTH_OUTLOOK') {
+        handleInteractiveAuthOutlook(request, sender);
         return true;
     }
 
@@ -189,4 +201,117 @@ function handleError(error, email, tabId) {
     } else {
         chrome.tabs.sendMessage(tabId, { type: 'EML_ERROR', error: msg });
     }
+}
+
+// --- Outlook/Microsoft Graph API Handlers ---
+
+async function handleGetRawMessageOutlook(request, sender) {
+    const email = request.email;
+    const messageId = request.messageId;
+    const tabId = sender.tab.id;
+
+    try {
+        // Try silent auth
+        try {
+            const token = await getOutlookAuthToken(false);
+            const data = await fetchRawMessageOutlook(messageId, token);
+            chrome.tabs.sendMessage(tabId, { type: 'EML_DATA', eml: data });
+            return; // Success!
+        } catch (silentErr) {
+            // Fall through to require interactive auth
+        }
+
+        throw new Error('AUTH_REQUIRED');
+
+    } catch (error) {
+        handleError(error, email, tabId);
+    }
+}
+
+async function handleInteractiveAuthOutlook(request, sender) {
+    const email = request.email;
+    const messageId = request.messageId;
+    const tabId = request.openerTabId || (sender.tab && sender.tab.id);
+
+    try {
+        const token = await getOutlookAuthToken(true);
+        const data = await fetchRawMessageOutlook(messageId, token);
+
+        if (tabId) {
+            chrome.tabs.sendMessage(tabId, { type: 'AUTH_SUCCESS', dontAskAgain: request.dontAskAgain });
+            chrome.tabs.sendMessage(tabId, { type: 'EML_DATA', eml: data });
+        }
+
+    } catch (error) {
+        handleError(error, email, tabId);
+    }
+}
+
+function getOutlookAuthToken(interactive) {
+    return new Promise((resolve, reject) => {
+        const manifest = chrome.runtime.getManifest();
+        const outlookConfig = manifest.outlook_oauth2 || {};
+        const clientId = outlookConfig.client_id;
+        
+        if (!clientId) {
+            reject(new Error('Outlook OAuth not configured in manifest'));
+            return;
+        }
+
+        const scopes = outlookConfig.scopes || ['Mail.Read'];
+        const redirectUri = chrome.identity.getRedirectURL();
+
+        let authUrl = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize` +
+            `?client_id=${clientId}` +
+            `&response_type=token` +
+            `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+            `&scope=${encodeURIComponent(scopes.join(' '))}`;
+
+        if (interactive) {
+            authUrl += `&prompt=select_account`;
+        }
+
+        chrome.identity.launchWebAuthFlow({
+            url: authUrl,
+            interactive: interactive
+        }, (redirectUrl) => {
+            if (chrome.runtime.lastError || !redirectUrl) {
+                reject(chrome.runtime.lastError || new Error('Auth flow failed or closed'));
+                return;
+            }
+            const matches = redirectUrl.match(/access_token=([^&]+)/);
+            if (matches && matches[1]) {
+                resolve(matches[1]);
+            } else {
+                reject(new Error('Invalid redirect URL'));
+            }
+        });
+    });
+}
+
+async function fetchRawMessageOutlook(messageId, token) {
+    // Use Microsoft Graph API to fetch the email in MIME format
+    const url = `https://graph.microsoft.com/v1.0/me/messages/${messageId}/$value`;
+
+    const response = await fetch(url, {
+        headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'message/rfc2822'
+        }
+    });
+
+    if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+            throw new Error('AUTH_REQUIRED');
+        }
+        throw new Error(`Microsoft Graph API Error: ${response.status}`);
+    }
+
+    // Get the raw MIME content
+    const mimeContent = await response.text();
+    
+    // Convert to base64 (same format as Gmail)
+    const base64 = btoa(unescape(encodeURIComponent(mimeContent)));
+    
+    return base64;
 }

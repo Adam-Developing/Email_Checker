@@ -22,6 +22,19 @@
       "css": [
         "injected-styles.css"
       ]
+    },
+    {
+      "matches": [
+        "https://outlook.live.com/*",
+        "https://outlook.office365.com/*",
+        "https://outlook.office.com/*"
+      ],
+      "js": [
+        "content-outlook.js"
+      ],
+      "css": [
+        "injected-styles.css"
+      ]
     }
   ],
   "web_accessible_resources": [
@@ -35,6 +48,19 @@
       "matches": [
         "https://mail.google.com/*"
       ]
+    },
+    {
+      "resources": [
+        "analysis-ui.html",
+        "core/shared-styles.css",
+        "core/analysis-ui-flow.js",
+        "core/analysis-core.js"
+      ],
+      "matches": [
+        "https://outlook.live.com/*",
+        "https://outlook.office365.com/*",
+        "https://outlook.office.com/*"
+      ]
     }
   ],
   "permissions": [
@@ -45,12 +71,24 @@
   "host_permissions": [
     "https://mail.google.com/",
     "https://www.googleapis.com/",
+    "https://outlook.live.com/",
+    "https://outlook.office365.com/",
+    "https://outlook.office.com/",
+    "https://graph.microsoft.com/",
+    "https://login.microsoftonline.com/",
     "http://127.0.0.1:8080/"
   ],
   "oauth2": {
     "client_id": "512828923789-k8hju3dcb2lkginpllc9cso8gsedubn0.apps.googleusercontent.com",
     "scopes": [
       "https://www.googleapis.com/auth/gmail.readonly"
+    ]
+  },
+  "outlook_oauth2": {
+    "client_id": "YOUR_MICROSOFT_CLIENT_ID_HERE",
+    "scopes": [
+      "Mail.Read",
+      "offline_access"
     ]
   }
 }
