@@ -290,7 +290,9 @@ function handleStreamEvent(eventName, payload, sessionId) {
 export function initializeUI(containerId, sessionId, settings = {}) {
     mergeChecks(settings);
     currentScores = { normal: 0, rendered: 0, base: 0, max: 100, sessionId };
-    activeSessionId = sessionId || activeSessionId;
+    activeSessionId = sessionId || crypto.randomUUID(); // Always get a fresh session ID
+    // Reset URL scan state to prevent leaking counts from previous analyses
+    urlScanState = { total: 0, completed: 0 };
     const container = document.getElementById(containerId);
     if (!container) return;
     container.style.display = "block";
@@ -300,14 +302,14 @@ export function initializeUI(containerId, sessionId, settings = {}) {
                 <div class="verdict-card">
                     <h3>📝 Text Analysis Score</h3>
                     <div class="progress-bar">
-                        <div id="text-progress-bar" class="progress-bar-inner" style="width: 0%;"></div>
+                        <div id="text-progress-bar" class="progress-bar-inner" style="width: 0;"></div>
                     </div>
                     <p id="text-score-text" class="score-text">Calculating... (0%)</p>
                 </div>
                 <div class="verdict-card">
                     <h3>🖼️ Rendered Analysis Score</h3>
                     <div class="progress-bar">
-                        <div id="rendered-progress-bar" class="progress-bar-inner" style="width: 0%;"></div>
+                        <div id="rendered-progress-bar" class="progress-bar-inner" style="width: 0;"></div>
                     </div>
                     <p id="rendered-score-text" class="score-text">Calculating... (0%)</p>
                 </div>

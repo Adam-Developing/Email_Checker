@@ -29,7 +29,12 @@ export async function handleAnalysisFlow(getEmlDataPromise, settings, uiElements
         if (statusElement) statusElement.innerText = "Analysis complete.";
 
     } catch (error) {
-        // Universal error handling
+        // Don't show error UI when the analysis was intentionally aborted (user navigated away)
+        if (error.name === 'AbortError') {
+            console.log('Analysis aborted (user navigated away).');
+            return;
+        }
+        // Universal error handling for real errors
         if (spinnerElement) spinnerElement.style.display = "none";
         if (statusElement) statusElement.innerText = `Error: ${error.message}`;
         console.error(error);

@@ -135,7 +135,7 @@ func init() {
 	aiModel = os.Getenv("AI_MODEL")
 	googleSearchAPIKey = os.Getenv("GOOGLE_SEARCH_API_KEY")
 	googleSearchCX = os.Getenv("GOOGLE_SEARCH_CX")
-	mainPrompt = os.Getenv("Main_Prompt")
+	mainPrompt = os.Getenv("MAIN_PROMPT")
 	URLScanAPIKey = os.Getenv("URLSCAN_API_KEY")
 	VTotalAPIKey = os.Getenv("VTotal_API_KEY")
 	isURLScanEnabled = os.Getenv("URLSCAN_ENABLED") == "TRUE"
@@ -234,7 +234,7 @@ func verifyStartupRequirements() error {
 		{geminiKey, "GEMINI_API_KEY", "Gemini content analysis"},
 		{googleSearchAPIKey, "GOOGLE_SEARCH_API_KEY", "Google Custom Search"},
 		{googleSearchCX, "GOOGLE_SEARCH_CX", "Google Custom Search CX"},
-		{mainPrompt, "Main_Prompt", "AI prompt instructions"},
+		{mainPrompt, "MAIN_PROMPT", "AI prompt instructions"},
 		{VTotalAPIKey, "VTotal_API_KEY", "VirusTotal URL scanning"},
 	}
 	for _, envVar := range requiredEnv {
@@ -332,7 +332,7 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Error closing request body: %v", err)
 		}
 	}(r.Body)
-	
+
 	base64Data, err := io.ReadAll(r.Body)
 	if err != nil {
 		log.Printf("Error reading request body: %v", err)

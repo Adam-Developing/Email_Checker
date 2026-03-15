@@ -2,7 +2,9 @@
 
 if (window.top === window.self) {
 
-    let analyzedMessageIds = new Set();
+    // Cache completed analysis results keyed by messageId, so revisiting
+    // an email can restore the UI without re-fetching.
+    let analysisCache = new Map(); // messageId -> { html, scoreData }
     let currentMessageId = null;
     let currentUserEmail = null;
     let currentSessionId = null;
@@ -70,11 +72,29 @@ if (window.top === window.self) {
                 return;
             }
 
-            if (analyzedMessageIds.has(messageId)) return;
+            // 2. If we have a cached result for this messageId, restore it
+            if (analysisCache.has(messageId)) {
+                const cached = analysisCache.get(messageId);
+                const resultsContainer = document.getElementById("results-container");
+                if (resultsContainer && cached.html) {
+                    resultsContainer.innerHTML = cached.html;
+                    resultsContainer.style.display = "block";
+                }
+                const statusContainer = document.getElementById("analysis-status-container");
+                if (statusContainer) statusContainer.style.display = "flex";
+                const statusElement = document.getElementById("item-subject");
+                if (statusElement) statusElement.innerText = "Analysis complete.";
+                const spinnerElement = document.getElementById("analysis-spinner");
+                if (spinnerElement) spinnerElement.style.display = "none";
 
-            // 2. CRITICAL FIX: Strict Authorization Check
-            // If the user is NOT marked 'authorized' (e.g. new user or reset in options),
-            // DO NOT try to fetch silently. Force the Auth UI immediately.
+                // Restore the score circle from cached data
+                if (cached.scoreData) {
+                    restoreScoreCircle(cached.scoreData);
+                }
+                return;
+            }
+
+            // 3. CRITICAL FIX: Strict Authorization Check
             if (state.status !== 'authorized') {
                 const scoreCircle = document.querySelector('.email-score-circle');
                 if (scoreCircle) {
@@ -82,18 +102,21 @@ if (window.top === window.self) {
                     scoreCircle.classList.add('low-score');
                     scoreCircle.textContent = 'Auth!';
 
-                    // Override click to open Auth Modal instead of empty results
                     scoreCircle.onclick = (e) => {
                         e.stopPropagation();
                         injectAuthModal(email, state, messageId);
                     };
                 }
-                return; // Stop here. Do not fetch data.
+                return;
             }
 
-            // 3. If Authorized, proceed with silent fetch
-            analyzedMessageIds.add(messageId);
+            // 4. Abort any in-flight analysis BEFORE starting a new one
+            if (currentAbortController) {
+                currentAbortController.abort();
+                currentAbortController = null;
+            }
 
+            // 5. If Authorized, proceed with fetch
             const analysisCoreUrl = chrome.runtime.getURL('core/analysis-core.js');
             import(analysisCoreUrl).then(({ initializeUI }) => {
                 const resultsContainer = document.getElementById("results-container");
@@ -101,11 +124,26 @@ if (window.top === window.self) {
                     currentSessionId = crypto.randomUUID();
                     initializeUI(resultsContainer.id, currentSessionId);
                 }
-                if (currentAbortController) currentAbortController.abort();
                 currentAbortController = new AbortController();
                 chrome.runtime.sendMessage({ type: 'GET_RAW_MESSAGE', messageId, email });
             });
         });
+    }
+
+    function restoreScoreCircle(scoreData) {
+        const { pct } = scoreData;
+        const scoreCircle = document.querySelector('.email-score-circle');
+        if (scoreCircle) {
+            scoreCircle.classList.remove('loading');
+            if (pct === null) {
+                scoreCircle.textContent = '--%';
+                scoreCircle.classList.remove('low-score', 'medium-score', 'high-score');
+            } else {
+                scoreCircle.textContent = `${pct.toFixed(0)}%`;
+                scoreCircle.classList.remove('low-score', 'medium-score', 'high-score');
+                scoreCircle.classList.add(pct < 40 ? 'low-score' : pct < 70 ? 'medium-score' : 'high-score');
+            }
+        }
     }
 
     function findUserEmailFromDOM() {
@@ -130,6 +168,11 @@ if (window.top === window.self) {
 
     chrome.runtime.onMessage.addListener(async (request) => {
         if (request.type === 'EML_DATA') {
+            // Ignore stale responses from a different email
+            if (request.messageId && request.messageId !== currentMessageId) {
+                console.log("Ignoring stale EML_DATA for", request.messageId, "current is", currentMessageId);
+                return;
+            }
             const analysisModuleUrl = chrome.runtime.getURL('core/analysis-ui-flow.js');
             const {handleAnalysisFlow} = await import(analysisModuleUrl);
             const uiElements = {
@@ -158,7 +201,8 @@ if (window.top === window.self) {
             }
 
             if (request.error === 'AUTH_REQUIRED') {
-                if (currentMessageId) analyzedMessageIds.delete(currentMessageId);
+                // Allow re-analysis after auth - remove from cache if present
+                if (currentMessageId) analysisCache.delete(currentMessageId);
                 const email = request.email || currentUserEmail;
 
                 if (email) {
@@ -200,6 +244,9 @@ if (window.top === window.self) {
             const authOverlay = document.querySelector('.auth-modal-overlay');
             if (authOverlay) authOverlay.style.display = 'none';
 
+            // Clear cache for current message so re-analysis can proceed
+            if (currentMessageId) analysisCache.delete(currentMessageId);
+
             const statusElement = document.getElementById("item-subject");
             if (statusElement) statusElement.innerText = "Auth successful! Continuing...";
             const scoreCircle = document.querySelector('.email-score-circle');
@@ -229,18 +276,29 @@ if (window.top === window.self) {
         if (sessionId && currentSessionId && sessionId !== currentSessionId) return;
 
         const checks = (window.latestExtensionChecks || {});
-        // Check if ANY check is enabled (values in checks object are booleans)
         const anyCheckEnabled = Object.values(checks).some(val => val === true);
 
         let pct = null;
 
         if (anyCheckEnabled) {
-            // Even if text/rendered checks are disabled, normalScore/renderedScore
-            // will contain the Base score (Domain/URL/Attachment).
             const nPct = Math.max(0, Math.min(100, (normalScore / maxScore) * 100));
             const rPct = Math.max(0, Math.min(100, (renderedScore / maxScore) * 100));
-            // Show the average of the available pipelines
             pct = (nPct + rPct) / 2;
+        }
+
+        // Cache the analysis results for this messageId
+        if (currentMessageId) {
+            const resultsContainer = document.getElementById("results-container");
+            analysisCache.set(currentMessageId, {
+                html: resultsContainer ? resultsContainer.innerHTML : '',
+                scoreData: { pct }
+            });
+
+            // Limit cache size to prevent unbounded growth (LRU: remove oldest)
+            if (analysisCache.size > 50) {
+                const firstKey = analysisCache.keys().next().value;
+                analysisCache.delete(firstKey);
+            }
         }
 
         const scoreCircle = document.querySelector('.email-score-circle');
@@ -268,6 +326,12 @@ if (window.top === window.self) {
         if (messageElement && email) {
             const messageId = messageElement.getAttribute('data-legacy-message-id');
             if (messageId !== currentMessageId || email !== currentUserEmail) {
+                // Abort any in-flight analysis for the old email IMMEDIATELY
+                if (currentAbortController) {
+                    currentAbortController.abort();
+                    currentAbortController = null;
+                }
+
                 currentMessageId = messageId;
                 currentUserEmail = email;
                 const oldCircle = document.querySelector('.email-score-circle');
@@ -287,6 +351,14 @@ if (window.top === window.self) {
                     });
                 }
             }
+        } else if (!messageElement && currentMessageId) {
+            // User navigated away from email view (back to inbox, etc.)
+            // Reset currentMessageId so re-opening the same email will trigger analysis
+            if (currentAbortController) {
+                currentAbortController.abort();
+                currentAbortController = null;
+            }
+            currentMessageId = null;
         }
     }).observe(document.body, { childList: true, subtree: true });
 

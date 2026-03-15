@@ -13,7 +13,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     if (request.type === 'GET_TAB_ID') {
         sendResponse({ tabId: sender.tab && sender.tab.id });
-        return;
+
     }
 });
 
@@ -27,7 +27,7 @@ async function handleGetRawMessage(request, sender) {
         try {
             const token = await getAuthToken(false);
             const data = await fetchRawMessage(email, messageId, token);
-            chrome.tabs.sendMessage(tabId, { type: 'EML_DATA', eml: data });
+            chrome.tabs.sendMessage(tabId, { type: 'EML_DATA', eml: data, messageId });
             return; // Success!
         } catch (nativeErr) {
             // Ignore error and fall through to Step B
@@ -37,7 +37,7 @@ async function handleGetRawMessage(request, sender) {
         if (email) {
             const webToken = await launchAuthFlow(email, false);
             const data = await fetchRawMessage(email, messageId, webToken);
-            chrome.tabs.sendMessage(tabId, { type: 'EML_DATA', eml: data });
+            chrome.tabs.sendMessage(tabId, { type: 'EML_DATA', eml: data, messageId });
             return; // Success!
         }
 
@@ -68,7 +68,7 @@ async function handleInteractiveAuth(request, sender) {
 
         if (tabId) {
             chrome.tabs.sendMessage(tabId, { type: 'AUTH_SUCCESS', dontAskAgain: request.dontAskAgain });
-            chrome.tabs.sendMessage(tabId, { type: 'EML_DATA', eml: data });
+            chrome.tabs.sendMessage(tabId, { type: 'EML_DATA', eml: data, messageId });
         }
 
     } catch (error) {
