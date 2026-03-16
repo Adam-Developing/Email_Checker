@@ -1,6 +1,10 @@
 # Email Security Analyser
 
-A Go backend + Chrome extension that analyses emails for phishing, impersonation, and security risks. Results stream in real-time via Server-Sent Events.
+| Spam Email | Real Email |
+| :---: | :---: |
+| <img width="1908" height="903" alt="Spam email" src="https://github.com/user-attachments/assets/fce655a5-16f3-43b9-9b35-408911667a2f" /> | <img width="1907" height="885" alt="Safe email" src="https://github.com/user-attachments/assets/f5854b8e-7a0a-4c43-b790-8ede98a94242" /> |
+
+A Python & Go backend + Chrome extension that analyses emails for phishing, impersonation, and security risks. Results stream in real-time via Server-Sent Events.
 
 ## How It Works
 
