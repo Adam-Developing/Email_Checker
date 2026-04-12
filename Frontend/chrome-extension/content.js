@@ -321,10 +321,39 @@ if (window.top === window.self) {
 
     injectModalContainer();
     new MutationObserver(() => {
-        const messageElement = document.querySelector('[data-legacy-message-id]');
         const email = findUserEmailFromDOM();
-        if (messageElement && email) {
-            const messageId = messageElement.getAttribute('data-legacy-message-id');
+        let targetMessageElement = null;
+        let targetFromElement = null;
+
+        if (email) {
+            const legacyElements = Array.from(document.querySelectorAll('[data-legacy-message-id]')).reverse();
+            for (const legacyEl of legacyElements) {
+                let container = legacyEl.closest('[role="listitem"], .h7, .kv, .zE, .adn');
+                if (!container && legacyEl.parentElement) {
+                    container = legacyEl.parentElement.parentElement;
+                }
+                if (container) {
+                    const gdEl = container.querySelector('.gD');
+                    if (gdEl) {
+                        const senderEmail = gdEl.getAttribute('email');
+                        if (senderEmail && senderEmail.toLowerCase() !== email.toLowerCase()) {
+                            targetMessageElement = legacyEl;
+                            targetFromElement = gdEl;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Fallback to original logic if we couldn't properly pair them up
+            if (!targetMessageElement || !targetFromElement) {
+                targetMessageElement = document.querySelector('[data-legacy-message-id]');
+                targetFromElement = document.querySelector('.gD');
+            }
+        }
+
+        if (targetMessageElement && targetFromElement && email) {
+            const messageId = targetMessageElement.getAttribute('data-legacy-message-id');
             if (messageId !== currentMessageId || email !== currentUserEmail) {
                 // Abort any in-flight analysis for the old email IMMEDIATELY
                 if (currentAbortController) {
@@ -334,24 +363,21 @@ if (window.top === window.self) {
 
                 currentMessageId = messageId;
                 currentUserEmail = email;
-                const oldCircle = document.querySelector('.email-score-circle');
-                if (oldCircle) oldCircle.remove();
-                const oldButton = document.querySelector('.manual-check-button');
-                if (oldButton) oldButton.remove();
+                
+                // Clear any existing circles to maintain a clean UI state
+                document.querySelectorAll('.email-score-circle').forEach(el => el.remove());
+                document.querySelectorAll('.manual-check-button').forEach(el => el.remove());
 
-                const fromElement = document.querySelector('.gD');
-                if (fromElement) {
-                    chrome.storage.sync.get({ analysisMode: 'auto' }, (items) => {
-                        if (items.analysisMode === 'auto') {
-                            injectScoreUI(fromElement);
-                            startAnalysis(messageId, email);
-                        } else {
-                            injectManualCheckButton(fromElement, messageId, email);
-                        }
-                    });
-                }
+                chrome.storage.sync.get({ analysisMode: 'auto' }, (items) => {
+                    if (items.analysisMode === 'auto') {
+                        injectScoreUI(targetFromElement);
+                        startAnalysis(messageId, email);
+                    } else {
+                        injectManualCheckButton(targetFromElement, messageId, email);
+                    }
+                });
             }
-        } else if (!messageElement && currentMessageId) {
+        } else if (!document.querySelector('[data-legacy-message-id]') && currentMessageId) {
             // User navigated away from email view (back to inbox, etc.)
             // Reset currentMessageId so re-opening the same email will trigger analysis
             if (currentAbortController) {
