@@ -18,6 +18,7 @@ if (window.top === window.self) {
     let currentSessionId = null;
     let currentAbortController = null;
     let currentFromElement = null;
+    let isForcedRerun = false;
 
     // Badge looks for states without a verdict. Verdict looks arrive with the analysis report.
     const BADGES = {
@@ -172,7 +173,11 @@ if (window.top === window.self) {
         badge.style.color = look.ink;
         const dot = badge.querySelector('.ec-badge-dot');
         dot.style.background = look.dot;
-        dot.textContent = look.glyph;
+        if (look.glyph === '⋯') {
+            dot.innerHTML = '<span class="ec-dots-loader"><span></span><span></span><span></span></span>';
+        } else {
+            dot.textContent = look.glyph;
+        }
         badge.querySelector('.ec-badge-label').textContent = look.label;
         badge.querySelector('.ec-badge-sub').textContent = look.sub;
         badge.title = `${look.label} — ${look.sub}`;
@@ -284,6 +289,7 @@ if (window.top === window.self) {
 
     async function startAnalysis(messageId, email, options = {}) {
         const forceRerun = !!options.forceRerun;
+        isForcedRerun = forceRerun;
         await ensureModalInjected();
 
         chrome.storage.sync.get({ accountsAuthState: {}, checks: {} }, async (items) => {
@@ -375,6 +381,8 @@ if (window.top === window.self) {
             }
 
             setStatus("Analyzing email…");
+            const forceRerun = isForcedRerun;
+            isForcedRerun = false;
 
             chrome.storage.sync.get({ checks: {} }, async (items) => {
                 const analysisCoreUrl = chrome.runtime.getURL('core/analysis-core.js');
@@ -384,7 +392,7 @@ if (window.top === window.self) {
                         signal: currentAbortController?.signal,
                         sessionId: currentSessionId,
                         emailKey: currentMessageId,
-                        forceRerun: false,
+                        forceRerun: forceRerun,
                     });
                 } catch (error) {
                     if (error.name === 'AbortError') {
@@ -471,6 +479,8 @@ if (window.top === window.self) {
     document.addEventListener('analysisComplete', async (e) => {
         const { sessionId, verdict, pct, badge, interstitial, report, results, html } = e.detail;
         if (sessionId && currentSessionId && sessionId !== currentSessionId) return;
+
+        setStatus("Analysis complete");
 
         const summary = { verdict, pct, badge, interstitial };
 
@@ -568,6 +578,7 @@ if (window.top === window.self) {
                 currentMessageId = messageId;
                 currentUserEmail = email;
                 currentFromElement = targetFromElement;
+                isForcedRerun = false;
 
                 // Clear any existing badges and warnings to maintain a clean UI state
                 document.querySelectorAll('.ec-badge').forEach(el => el.remove());
@@ -629,6 +640,7 @@ if (window.top === window.self) {
                 currentAbortController = null;
             }
             currentMessageId = null;
+            isForcedRerun = false;
         }
     }).observe(document.body, { childList: true, subtree: true });
 

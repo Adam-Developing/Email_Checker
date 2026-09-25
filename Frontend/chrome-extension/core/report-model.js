@@ -113,18 +113,31 @@ function gatherFacts(results) {
     for (const v of results.urlAnalysis?.urlVerdicts || []) {
         if (v && v.report) flaggedByReport.set(v.report, v.score);
     }
-    const urls = (results.urlResults || []).map((r) => ({
+    const scannedUrls = (results.urlResults || []).map((r) => ({
         url: r.url,
         report: r.report || "",
         kind: r.error ? "error" : (r.finalDecision ? "malicious" : "clean"),
         flagged: flaggedByReport.has(r.report) ? flaggedByReport.get(r.report) : null,
         error: r.error || "",
     }));
+    const skippedSensitiveCount = results.urlAnalysis?.skippedSensitiveCount || 0;
+    const skippedSensitiveReasons = results.urlAnalysis?.skippedSensitiveReasons || [];
+    const skippedReasonSummary = skippedSensitiveReasons.join(", ");
+    const skippedUrls = (results.urlAnalysis?.skippedURLs || []).map((s) => ({
+        url: s.url,
+        report: "",
+        kind: "skipped",
+        reason: s.category || "sensitive link",
+        flagged: null,
+        error: "",
+    }));
+    const urls = [...scannedUrls, ...skippedUrls];
     const urlsOn = on("checkUrls");
     const urlsServerDisabled = results.urlAnalysis?.status === "Disabled";
     const maliciousCount = Math.max(results.urlAnalysis?.maliciousCount || 0, urls.filter((u) => u.kind === "malicious").length);
     const urlErrorCount = urls.filter((u) => u.kind === "error").length;
-    const urlCount = Math.max(urls.length, results.urlTotal || 0);
+    const urlCount = Math.max(scannedUrls.length, results.urlTotal || 0);
+    const urlMessage = results.urlAnalysis?.message || "";
 
     const attachmentsOn = on("checkAttachments");
     const attachmentFound = attachmentsOn && !!results.attachments?.found;
@@ -162,6 +175,7 @@ function gatherFacts(results) {
         results, on, analyses, contentOn, ran, identifiedIn, company, verified,
         domain, senderDomain, impersonation, exactMatch, officialDomain,
         urls, urlsOn, urlsServerDisabled, maliciousCount, urlErrorCount, urlCount,
+        skippedSensitiveCount, skippedSensitiveReasons, skippedReasonSummary, urlMessage,
         attachmentsOn, attachmentFound, attachmentName,
         realismKnown, unrealistic, realismReason,
         phones, invalidPhones, validPhones, failed,
@@ -463,11 +477,24 @@ function buildChecks(f) {
             const lostUrl = Math.max(0, MAX.urls - earnedUrl);
             const count = f.urlCount || 0;
             let title = "Safe Links";
-            let reason = count === 0
-                ? "No external links found in the email."
-                : count === 1
-                    ? "1 link scanned clean with no security threats."
-                    : `All ${count} links scanned clean with no security threats.`;
+            let reason;
+
+            if (f.skippedSensitiveCount > 0) {
+                const suffix = f.skippedSensitiveCount === 1 ? "to keep your link valid." : "to keep your links valid.";
+                reason = f.urlMessage || (count === 0
+                    ? (f.skippedSensitiveCount === 1
+                        ? `1 sensitive link skipped (${f.skippedReasonSummary || "sensitive"}) ${suffix}`
+                        : `${f.skippedSensitiveCount} sensitive links skipped (${f.skippedReasonSummary || "sensitive"}) ${suffix}`)
+                    : (count === 1
+                        ? `1 link scanned clean. ${f.skippedSensitiveCount} sensitive link(s) skipped ${suffix}`
+                        : `All ${count} links scanned clean. ${f.skippedSensitiveCount} sensitive link(s) skipped ${suffix}`));
+            } else {
+                reason = count === 0
+                    ? "No external links found in the email."
+                    : count === 1
+                        ? "1 link scanned clean with no security threats."
+                        : `All ${count} links scanned clean with no security threats.`;
+            }
             let isGained = earnedUrl > 0;
             let severity = 0;
 
@@ -659,11 +686,13 @@ export function buildReport(results) {
                 kind: u.kind,
                 url: u.url,
                 report: /^https:\/\/www\.virustotal\.com\//.test(u.report) ? u.report : "",
-                engines: u.kind === "error" ? "failed" : `${u.flagged || 0} flagged`,
+                engines: u.kind === "error" ? "failed" : u.kind === "skipped" ? "skipped" : `${u.flagged || 0} flagged`,
+                reason: u.reason || "",
             })),
             urlsOn: f.urlsOn,
             urlCount: f.urlCount,
             maliciousCount: f.maliciousCount,
+            skippedSensitiveCount: f.skippedSensitiveCount,
         };
     }
 
@@ -740,10 +769,12 @@ export function buildReport(results) {
             kind: u.kind,
             url: u.url,
             report: /^https:\/\/www\.virustotal\.com\//.test(u.report) ? u.report : "",
-            engines: u.kind === "error" ? "failed" : `${u.flagged || 0} flagged`,
+            engines: u.kind === "error" ? "failed" : u.kind === "skipped" ? "skipped" : `${u.flagged || 0} flagged`,
+            reason: u.reason || "",
         })),
         urlsOn: f.urlsOn,
         urlCount: f.urlCount,
         maliciousCount: f.maliciousCount,
+        skippedSensitiveCount: f.skippedSensitiveCount,
     };
 }

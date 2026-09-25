@@ -58,13 +58,24 @@ export async function streamAnalysis(emlData, settings, options = {}) {
         });
     }
 
+    if (forceRerun) {
+        url.searchParams.append("rerun", "true");
+        url.searchParams.append("forceRerun", "true");
+    }
+
+    const headers = {
+        "Content-Type": "text/plain;charset=UTF-8",
+    };
+    if (forceRerun) {
+        headers["X-Force-Rerun"] = "true";
+        headers["Cache-Control"] = "no-cache";
+    }
+
     let response;
     try {
         response = await fetch(url.href, {
             method: "POST",
-            headers: {
-                "Content-Type": "text/plain;charset=UTF-8"
-            },
+            headers,
             body: emlData,
             signal,
         });

@@ -1155,7 +1155,7 @@ func getFinalURL(ctx context.Context, start string) (string, error) {
 	return resp.Request.URL.String(), nil
 }
 
-func checkURLs(ctx context.Context, u string) (*Verdict, error) {
+func checkURLs(ctx context.Context, u string, bypassCache bool) (*Verdict, error) {
 
 	if URLScanAPIKey == "" {
 		return nil, fmt.Errorf("URLSCAN_API_KEY not set")
@@ -1164,67 +1164,71 @@ func checkURLs(ctx context.Context, u string) (*Verdict, error) {
 	c := newClientWithDefaultHeaders()
 	c.Timeout = 20 * time.Second
 
-	// --- 1. Search for an Existing Recent Scan First ---
-	log.Printf("Searching for existing scan of %s...", u)
-	q := url.QueryEscape(fmt.Sprintf(`page.url:"%s" AND date:>now-7d`, u))
-	searchReq, err := http.NewRequestWithContext(ctx, "GET", "https://urlscan.io/api/v1/search/?size=1&q="+q, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create search req: %w", err)
-	}
-
-	searchResp, err := c.Do(searchReq)
-	if err != nil {
-		return nil, fmt.Errorf("execute search: %w", err)
-	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
+	// --- 1. Search for an Existing Recent Scan First (skipped on rerun / cache bypass) ---
+	if !bypassCache {
+		log.Printf("Searching for existing scan of %s...", u)
+		q := url.QueryEscape(fmt.Sprintf(`page.url:"%s" AND date:>now-7d`, u))
+		searchReq, err := http.NewRequestWithContext(ctx, "GET", "https://urlscan.io/api/v1/search/?size=1&q="+q, nil)
 		if err != nil {
-			log.Printf("Error closing response body: %v", err)
-		}
-	}(searchResp.Body)
-
-	if searchResp.StatusCode == http.StatusOK {
-		var searchResult struct {
-			Results []struct {
-				Result   string `json:"result"`
-				Verdicts struct {
-					Overall struct {
-						Score      int      `json:"score"`
-						Categories []string `json:"categories"`
-						Malicious  bool     `json:"malicious"`
-					} `json:"overall"`
-				} `json:"verdicts"`
-			} `json:"results"`
+			return nil, fmt.Errorf("create search req: %w", err)
 		}
 
-		if err := json.NewDecoder(searchResp.Body).Decode(&searchResult); err == nil && len(searchResult.Results) > 0 {
-			r0 := searchResult.Results[0]
-			log.Printf("Found recent scan for %s. Using cached result.", u)
+		searchResp, err := c.Do(searchReq)
+		if err != nil {
+			return nil, fmt.Errorf("execute search: %w", err)
+		}
+		defer func(Body io.ReadCloser) {
+			err := Body.Close()
+			if err != nil {
+				log.Printf("Error closing response body: %v", err)
+			}
+		}(searchResp.Body)
 
-			var finalAppDecision bool = false
-			if r0.Verdicts.Overall.Malicious || r0.Verdicts.Overall.Score > 0 {
-				finalAppDecision = true
-			} else {
-				for _, cat := range r0.Verdicts.Overall.Categories {
-					if cat == "phishing" || cat == "malware" {
-						finalAppDecision = true
-						break
-					}
-				}
+		if searchResp.StatusCode == http.StatusOK {
+			var searchResult struct {
+				Results []struct {
+					Result   string `json:"result"`
+					Verdicts struct {
+						Overall struct {
+							Score      int      `json:"score"`
+							Categories []string `json:"categories"`
+							Malicious  bool     `json:"malicious"`
+						} `json:"overall"`
+					} `json:"verdicts"`
+				} `json:"results"`
 			}
 
-			return &Verdict{
-				Score:           r0.Verdicts.Overall.Score,
-				Cats:            r0.Verdicts.Overall.Categories,
-				Report:          r0.Result,
-				PlatformVerdict: r0.Verdicts.Overall.Malicious,
-				FinalDecision:   finalAppDecision,
-			}, nil
+			if err := json.NewDecoder(searchResp.Body).Decode(&searchResult); err == nil && len(searchResult.Results) > 0 {
+				r0 := searchResult.Results[0]
+				log.Printf("Found recent scan for %s. Using cached result.", u)
+
+				var finalAppDecision bool = false
+				if r0.Verdicts.Overall.Malicious || r0.Verdicts.Overall.Score > 0 {
+					finalAppDecision = true
+				} else {
+					for _, cat := range r0.Verdicts.Overall.Categories {
+						if cat == "phishing" || cat == "malware" {
+							finalAppDecision = true
+							break
+						}
+					}
+				}
+
+				return &Verdict{
+					Score:           r0.Verdicts.Overall.Score,
+					Cats:            r0.Verdicts.Overall.Categories,
+					Report:          r0.Result,
+					PlatformVerdict: r0.Verdicts.Overall.Malicious,
+					FinalDecision:   finalAppDecision,
+				}, nil
+			}
 		}
+	} else {
+		log.Printf("Rerun requested for %s. Bypassing cached urlscan.io search.", u)
 	}
 
-	// --- 2. If No Recent Scan Found, Submit a New One (Fallback) ---
-	log.Printf("No recent scan found for %s. Submitting a new scan.", u)
+	// --- 2. If No Recent Scan Found or Rerun Requested, Submit a New One ---
+	log.Printf("Submitting scan for %s to urlscan.io.", u)
 
 	// This is the polling logic from before
 	reqBody := strings.NewReader(`{"url":"` + u + `","visibility":"unlisted"}`)
@@ -1363,7 +1367,7 @@ func checkURLs(ctx context.Context, u string) (*Verdict, error) {
 	}
 }
 
-func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
+func checkURLsVTotal(ctx context.Context, u string, bypassCache bool) (*Verdict, error) {
 	if VTotalAPIKey == "" {
 		return nil, fmt.Errorf("VTotal_API_KEY not set")
 	}
@@ -1374,74 +1378,9 @@ func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
 	// VT requires strictly no padding '=' for the ID
 	encodedURL := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(u))
 
-	// 2. Check existing analysis report
-	apiURL := fmt.Sprintf("https://www.virustotal.com/api/v3/urls/%s", encodedURL)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("x-apikey", VTotalAPIKey)
-	req.Header.Set("accept", "application/json")
-
-	res, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query VT: %w", err)
-	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			log.Printf("Error closing response body: %v", err)
-		}
-	}(res.Body)
-
-	// --- PATH A: Existing Report Found ---
-	if res.StatusCode == http.StatusOK {
-		var result struct {
-			Data struct {
-				Attributes struct {
-					LastAnalysisStats struct { // Note: Field name differs on URL object
-						Harmless   int `json:"harmless"`
-						Malicious  int `json:"malicious"`
-						Suspicious int `json:"suspicious"`
-						Undetected int `json:"undetected"`
-					} `json:"last_analysis_stats"`
-					LastAnalysisResults map[string]struct { // Note: Field name differs on URL object
-						Category string `json:"category"`
-					} `json:"last_analysis_results"`
-				} `json:"attributes"`
-			} `json:"data"`
-		}
-
-		if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
-			return nil, fmt.Errorf("decode existing result: %w", err)
-		}
-
-		score := result.Data.Attributes.LastAnalysisStats.Malicious + result.Data.Attributes.LastAnalysisStats.Suspicious
-		cats := []string{}
-		for _, r := range result.Data.Attributes.LastAnalysisResults {
-			if r.Category != "undetected" && r.Category != "" {
-				cats = append(cats, r.Category)
-			}
-		}
-
-		malicious := result.Data.Attributes.LastAnalysisStats.Malicious > 0
-		finalDecision := malicious || score > 0
-		reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL)
-
-		return &Verdict{
-			Score:           score,
-			Cats:            cats,
-			Report:          reportURL,
-			PlatformVerdict: malicious,
-			FinalDecision:   finalDecision,
-		}, nil
-	}
-
-	// --- PATH B: New Submission (404 Not Found) ---
-	if res.StatusCode == http.StatusNotFound {
-		log.Printf("No prior scan found for %s — submitting...", u)
+	// Helper to submit a fresh scan to VT and poll for results
+	submitAndPoll := func() (*Verdict, error) {
+		log.Printf("Submitting new scan to VirusTotal for %s...", u)
 		submitURL := "https://www.virustotal.com/api/v3/urls"
 		// VT expects "url=..." form data
 		form := url.Values{}
@@ -1579,7 +1518,103 @@ func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("unexpected VT status code: %d", res.StatusCode)
+	// Helper to fetch an existing cached report from VT
+	getExistingReport := func() (*Verdict, int, error) {
+		apiURL := fmt.Sprintf("https://www.virustotal.com/api/v3/urls/%s", encodedURL)
+		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		req.Header.Set("x-apikey", VTotalAPIKey)
+		req.Header.Set("accept", "application/json")
+
+		res, err := client.Do(req)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to query VT: %w", err)
+		}
+		defer func(Body io.ReadCloser) {
+			err := Body.Close()
+			if err != nil {
+				log.Printf("Error closing response body: %v", err)
+			}
+		}(res.Body)
+
+		if res.StatusCode == http.StatusOK {
+			var result struct {
+				Data struct {
+					Attributes struct {
+						LastAnalysisStats struct {
+							Harmless   int `json:"harmless"`
+							Malicious  int `json:"malicious"`
+							Suspicious int `json:"suspicious"`
+							Undetected int `json:"undetected"`
+						} `json:"last_analysis_stats"`
+						LastAnalysisResults map[string]struct {
+							Category string `json:"category"`
+						} `json:"last_analysis_results"`
+					} `json:"attributes"`
+				} `json:"data"`
+			}
+
+			if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+				return nil, res.StatusCode, fmt.Errorf("decode existing result: %w", err)
+			}
+
+			score := result.Data.Attributes.LastAnalysisStats.Malicious + result.Data.Attributes.LastAnalysisStats.Suspicious
+			cats := []string{}
+			for _, r := range result.Data.Attributes.LastAnalysisResults {
+				if r.Category != "undetected" && r.Category != "" {
+					cats = append(cats, r.Category)
+				}
+			}
+
+			malicious := result.Data.Attributes.LastAnalysisStats.Malicious > 0
+			finalDecision := malicious || score > 0
+			reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL)
+
+			return &Verdict{
+				Score:           score,
+				Cats:            cats,
+				Report:          reportURL,
+				PlatformVerdict: malicious,
+				FinalDecision:   finalDecision,
+			}, res.StatusCode, nil
+		}
+
+		return nil, res.StatusCode, nil
+	}
+
+	// If bypassCache is requested (user wants rerun):
+	if bypassCache {
+		log.Printf("Rerun requested for %s. Bypassing cached VirusTotal report.", u)
+		verdict, err := submitAndPoll()
+		if err == nil {
+			return verdict, nil
+		}
+		log.Printf("Fresh VT scan submission failed on rerun (%v); attempting fallback to existing report.", err)
+		if fallbackVerdict, _, fallbackErr := getExistingReport(); fallbackErr == nil && fallbackVerdict != nil {
+			log.Printf("Successfully fell back to existing VirusTotal report for %s.", u)
+			return fallbackVerdict, nil
+		}
+		return nil, fmt.Errorf("fresh scan submission failed and no fallback available: %w", err)
+	}
+
+	// Normal run (!bypassCache): Check existing report first
+	verdict, statusCode, err := getExistingReport()
+	if err != nil {
+		return nil, err
+	}
+	if statusCode == http.StatusOK && verdict != nil {
+		log.Printf("Found existing scan for %s on VirusTotal. Using cached result.", u)
+		return verdict, nil
+	}
+
+	if statusCode == http.StatusNotFound {
+		log.Printf("No prior scan found for %s — submitting new scan...", u)
+		return submitAndPoll()
+	}
+
+	return nil, fmt.Errorf("unexpected VT status code: %d", statusCode)
 }
 
 // In main.go (can be a new function)
@@ -1608,39 +1643,78 @@ func analyseForExecutables(env *enmime.Envelope) (found bool, message string) {
 	return false, "No dangerous attachments found."
 }
 
-func isSensitiveURL(linkUrl, linkText string) bool {
+type SensitiveKeywordGroup struct {
+	Category string
+	Keywords []string
+}
+
+var SensitiveKeywordGroups = []SensitiveKeywordGroup{
+	{
+		Category: "account activation",
+		Keywords: []string{"activate", "activation"},
+	},
+	{
+		Category: "account confirmation",
+		Keywords: []string{"confirm", "confirmation", "verify", "verification"},
+	},
+	{
+		Category: "password reset",
+		Keywords: []string{"reset password", "password reset", "reset-password", "password-reset", "change password", "change-password", "recover account", "unlock"},
+	},
+	{
+		Category: "one-time login",
+		Keywords: []string{"magic link", "instant login", "auto-login", "one-time", "magic-link"},
+	},
+	{
+		Category: "unsubscribe",
+		Keywords: []string{"unsubscribe", "opt-out", "optout", "opt-in", "subscription", "preferences"},
+	},
+	{
+		Category: "workflow approval",
+		Keywords: []string{"approve", "reject", "accept", "decline", "authorize", "consent"},
+	},
+	{
+		Category: "invitation",
+		Keywords: []string{"invitation", "join team"},
+	},
+	{
+		Category: "account action",
+		Keywords: []string{"delete", "cancel", "remove", "terminate", "downgrade"},
+	},
+	{
+		Category: "payment",
+		Keywords: []string{"pay now", "invoice", "checkout", "billing", "purchase"},
+	},
+}
+
+// checkSensitiveURL checks if a link URL or text contains sensitive keywords (tokens, verification, etc.)
+// and returns whether it is sensitive along with a human-readable category.
+func checkSensitiveURL(linkUrl, linkText string) (bool, string) {
 	combined := strings.ToLower(linkUrl + " " + linkText)
+	normalized := strings.ReplaceAll(combined, "-", " ")
+	normalized = strings.ReplaceAll(normalized, "_", " ")
+	normalized = strings.ReplaceAll(normalized, "/", " ")
 
-	keywords := []string{
-		// Unsubscribe & Preferences
-		"unsubscribe", "opt-out", "optout", "subscription", "preferences",
-
-		// Account Security & Verification
-		"activate", "activation", "verify", "verification",
-		"confirm", "confirmation", "reset password", "change password",
-		"recover account", "unlock",
-
-		// Authentication (Magic Links)
-		"magic link", "instant login", "auto-login", "one-time",
-
-		// Workflow & Approvals
-		"approve", "reject", "accept", "decline", "authorize", "consent",
-		"invitation", "join team",
-
-		// Destructive Actions
-		"delete", "cancel", "remove", "terminate", "downgrade",
-
-		// Financial & Commerce
-		"pay now", "invoice", "checkout", "billing", "purchase",
+	// Explicit check for password reset/change phrases
+	if (strings.Contains(combined, "reset") || strings.Contains(combined, "change")) && strings.Contains(combined, "password") {
+		fmt.Printf("Sensitive URL detected (password reset): %s %s\n", linkUrl, linkText)
+		return true, "password reset"
 	}
 
-	for _, kw := range keywords {
-		if strings.Contains(combined, kw) {
-			fmt.Printf("Sensitive URL detected: %s %s\n", linkUrl, linkText)
-			return true
+	for _, group := range SensitiveKeywordGroups {
+		for _, kw := range group.Keywords {
+			if strings.Contains(combined, kw) || strings.Contains(normalized, kw) {
+				fmt.Printf("Sensitive URL detected (%s): %s %s\n", group.Category, linkUrl, linkText)
+				return true, group.Category
+			}
 		}
 	}
-	return false
+	return false, ""
+}
+
+func isSensitiveURL(linkUrl, linkText string) bool {
+	isSens, _ := checkSensitiveURL(linkUrl, linkText)
+	return isSens
 }
 
 // Add this function to extract URLs + Anchor Text

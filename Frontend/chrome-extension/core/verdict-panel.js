@@ -111,8 +111,10 @@ export function renderReportPanel(report) {
     if (report.urlsOn && report.urls && report.urls.length > 0) {
         const items = report.urls.map((u) => {
             const isMal = u.kind === "malicious";
-            const tagClass = isMal ? "is-malicious" : "is-clean";
-            const tagLabel = isMal ? "Flagged" : "Clean";
+            const isSkipped = u.kind === "skipped";
+            const tagClass = isMal ? "is-malicious" : isSkipped ? "is-skipped" : "is-clean";
+            const tagLabel = isMal ? "Flagged" : isSkipped ? "Skipped" : "Clean";
+            const note = u.reason ? `<span class="ec-url-note">(${escapeHtml(u.reason)})</span>` : "";
             const link = u.report
                 ? `<a class="ec-url-link" href="${escapeHtml(u.report)}" target="_blank" rel="noopener noreferrer">${escapeHtml(u.url)}</a>`
                 : `<span class="ec-url-link">${escapeHtml(u.url)}</span>`;
@@ -120,13 +122,17 @@ export function renderReportPanel(report) {
                 <li class="ec-url-item ${tagClass}">
                     <span class="ec-url-status ${tagClass}">${tagLabel}</span>
                     ${link}
+                    ${note}
                 </li>`;
         }).join("");
+
+        const hasSkipped = report.urls.some((u) => u.kind === "skipped");
+        const listLabel = hasSkipped ? `Links (${report.urls.length})` : `Scanned links (${report.urls.length})`;
 
         urlsHtml = `
             <div class="ec-urls-container">
                 <button type="button" class="ec-urls-toggle" data-ec-action="toggle-links" aria-expanded="false">
-                    <span>Scanned links (${report.urls.length})</span>
+                    <span>${listLabel}</span>
                     <span class="ec-toggle-chevron">▼ Show</span>
                 </button>
                 <div class="ec-urls-dropdown" hidden>

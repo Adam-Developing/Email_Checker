@@ -45,12 +45,20 @@ type DomainAnalysisResult struct {
 	ScoreImpact      int    `json:"scoreImpact"`
 	SuspectSubdomain string `json:"suspectSubdomain"` // Added for context
 }
+type SkippedURL struct {
+	URL      string `json:"url"`
+	Category string `json:"category"`
+}
+
 type URLAnalysisResult struct {
-	Status         string    `json:"status"`
-	Message        string    `json:"message"`
-	MaliciousCount int       `json:"maliciousCount"`
-	ScoreImpact    int       `json:"scoreImpact"`
-	UrlVerdicts    []Verdict `json:"urlVerdicts"` // Embed verdicts
+	Status                  string       `json:"status"`
+	Message                 string       `json:"message"`
+	MaliciousCount          int          `json:"maliciousCount"`
+	ScoreImpact             int          `json:"scoreImpact"`
+	UrlVerdicts             []Verdict    `json:"urlVerdicts"` // Embed verdicts
+	SkippedSensitiveCount   int          `json:"skippedSensitiveCount,omitempty"`
+	SkippedSensitiveReasons []string     `json:"skippedSensitiveReasons,omitempty"`
+	SkippedURLs             []SkippedURL `json:"skippedURLs,omitempty"`
 }
 type ExecutableAnalysisResult struct {
 	Found       bool   `json:"found"`
@@ -306,7 +314,7 @@ func enableCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Force-Rerun, Cache-Control")
 		if r.Method == "OPTIONS" {
 			return
 		}
@@ -411,6 +419,15 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 		"checkRenderedAnalysis": r.URL.Query().Get("checkRenderedAnalysis") != "false",
 	}
 
+	isRerun := r.URL.Query().Get("rerun") == "true" ||
+		r.URL.Query().Get("forceRerun") == "true" ||
+		r.Header.Get("X-Force-Rerun") == "true" ||
+		strings.Contains(r.Header.Get("Cache-Control"), "no-cache")
+
+	if isRerun {
+		log.Println("Rerun requested by client. Bypassing cached results.")
+	}
+
 	maxScore := MaxScoreFor(enabledChecks)
 	eventChan <- CheckResult{
 		EventName: "maxScore",
@@ -450,7 +467,7 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 	if enabledChecks["checkUrls"] {
 		analysisWg.Add(1)
 		activeChecks++
-		go performURLAnalysis(&analysisWg, resultsChan, eventChan, r.Context(), Email)
+		go performURLAnalysis(&analysisWg, resultsChan, eventChan, r.Context(), Email, isRerun)
 	}
 	if enabledChecks["checkAttachments"] {
 		analysisWg.Add(1)
@@ -599,7 +616,7 @@ func performDomainAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, db *sql.DB
 	ch <- CheckResult{EventName: "domainAnalysis", Payload: result}
 }
 
-func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan chan<- CheckResult, rCtx context.Context, Email EmailData) {
+func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan chan<- CheckResult, rCtx context.Context, Email EmailData, bypassCache bool) {
 	defer wg.Done()
 	var check Check
 	for _, c := range AllChecks {
@@ -627,11 +644,19 @@ func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan cha
 		".css": {}, ".svg": {}, ".woff": {}, ".woff2": {}, ".ttf": {}, ".js": {},
 	}
 
+	type skippedInfo struct {
+		category string
+	}
+	skippedMap := make(map[string]skippedInfo)
+
 	// 1. Process HTML Links (with anchor text)
 	htmlLinks := extractLinksFromHTML(Email.HTML)
 	for _, l := range htmlLinks {
 		decodedURL := html.UnescapeString(strings.TrimSpace(l.URL))
-		if isSensitiveURL(decodedURL, l.Text) {
+		if isSens, cat := checkSensitiveURL(decodedURL, l.Text); isSens {
+			if _, exists := skippedMap[decodedURL]; !exists {
+				skippedMap[decodedURL] = skippedInfo{category: cat}
+			}
 			continue // Skip sensitive links
 		}
 		if parsedURL, err := url.Parse(decodedURL); err == nil {
@@ -645,8 +670,12 @@ func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan cha
 	textLinks := getURL(Email.Text)
 	for _, u := range textLinks {
 		decodedURL := html.UnescapeString(strings.TrimSpace(u))
+		if _, alreadySkipped := skippedMap[decodedURL]; alreadySkipped {
+			continue
+		}
 		// Pass empty string for text, checking URL only
-		if isSensitiveURL(decodedURL, "") {
+		if isSens, cat := checkSensitiveURL(decodedURL, ""); isSens {
+			skippedMap[decodedURL] = skippedInfo{category: cat}
 			continue
 		}
 		if parsedURL, err := url.Parse(decodedURL); err == nil {
@@ -654,6 +683,39 @@ func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan cha
 				uniqueURLs[decodedURL] = struct{}{}
 			}
 		}
+	}
+
+	// Build deterministic list of skipped URLs and categories
+	var skippedURLs []SkippedURL
+	reasonSet := make(map[string]struct{})
+	var skippedReasonsList []string
+
+	for _, l := range htmlLinks {
+		decodedURL := html.UnescapeString(strings.TrimSpace(l.URL))
+		if info, ok := skippedMap[decodedURL]; ok {
+			skippedURLs = append(skippedURLs, SkippedURL{URL: decodedURL, Category: info.category})
+			if _, seen := reasonSet[info.category]; !seen && info.category != "" {
+				reasonSet[info.category] = struct{}{}
+				skippedReasonsList = append(skippedReasonsList, info.category)
+			}
+			delete(skippedMap, decodedURL)
+		}
+	}
+	for _, u := range textLinks {
+		decodedURL := html.UnescapeString(strings.TrimSpace(u))
+		if info, ok := skippedMap[decodedURL]; ok {
+			skippedURLs = append(skippedURLs, SkippedURL{URL: decodedURL, Category: info.category})
+			if _, seen := reasonSet[info.category]; !seen && info.category != "" {
+				reasonSet[info.category] = struct{}{}
+				skippedReasonsList = append(skippedReasonsList, info.category)
+			}
+			delete(skippedMap, decodedURL)
+		}
+	}
+
+	reasonsStr := strings.Join(skippedReasonsList, ", ")
+	if reasonsStr == "" {
+		reasonsStr = "sensitive action"
 	}
 
 	var finalURLsEmail []string
@@ -678,7 +740,7 @@ func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan cha
 		urlWg.Add(1)
 		go func(url string) {
 			defer urlWg.Done()
-			if v, err := checkURLsVTotal(ctx, url); err == nil && v != nil {
+			if v, err := checkURLsVTotal(ctx, url, bypassCache); err == nil && v != nil {
 				verdictsChan <- *v
 				// Stream individual result back to the central event channel
 				eventChan <- CheckResult{
@@ -710,15 +772,45 @@ func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan cha
 		}
 	}
 
-	result := URLAnalysisResult{UrlVerdicts: verdicts, MaliciousCount: maliciousURLCount}
+	result := URLAnalysisResult{
+		UrlVerdicts:             verdicts,
+		MaliciousCount:          maliciousURLCount,
+		SkippedSensitiveCount:   len(skippedURLs),
+		SkippedSensitiveReasons: skippedReasonsList,
+		SkippedURLs:             skippedURLs,
+	}
 	if maliciousURLCount > 0 {
 		result.Status = "MaliciousURLsDetected"
-		result.Message = fmt.Sprintf("%d malicious URL(s) were detected.", maliciousURLCount)
 		result.ScoreImpact = 0 // No points if malicious URLs are found
+		if len(skippedURLs) > 0 {
+			result.Message = fmt.Sprintf("%d malicious URL(s) were detected. %d sensitive link(s) skipped (%s).", maliciousURLCount, len(skippedURLs), reasonsStr)
+		} else {
+			result.Message = fmt.Sprintf("%d malicious URL(s) were detected.", maliciousURLCount)
+		}
 	} else {
 		result.Status = "Clean"
-		result.Message = "No malicious URLs were found."
 		result.ScoreImpact = check.Impact
+		if len(skippedURLs) > 0 {
+			suffix := "to keep your link valid"
+			if len(skippedURLs) > 1 {
+				suffix = "to keep your links valid"
+			}
+			if len(verdicts) == 0 {
+				if len(skippedURLs) == 1 {
+					result.Message = fmt.Sprintf("1 sensitive link skipped (%s) %s.", reasonsStr, suffix)
+				} else {
+					result.Message = fmt.Sprintf("%d sensitive links skipped (%s) %s.", len(skippedURLs), reasonsStr, suffix)
+				}
+			} else {
+				if len(skippedURLs) == 1 {
+					result.Message = fmt.Sprintf("%d link(s) scanned clean. 1 sensitive link skipped (%s) %s.", len(verdicts), reasonsStr, suffix)
+				} else {
+					result.Message = fmt.Sprintf("%d link(s) scanned clean. %d sensitive links skipped (%s) %s.", len(verdicts), len(skippedURLs), reasonsStr, suffix)
+				}
+			}
+		} else {
+			result.Message = "No malicious URLs were found."
+		}
 	}
 	ch <- CheckResult{EventName: "urlAnalysis", Payload: result}
 }
