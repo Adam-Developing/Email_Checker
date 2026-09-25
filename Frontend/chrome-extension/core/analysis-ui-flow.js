@@ -1,4 +1,4 @@
-import { initializeUI, streamAnalysis } from './analysis-core.js';
+import { initializeUI, streamAnalysis, showAnalysisError } from './analysis-core.js';
 
 export async function handleAnalysisFlow(getEmlDataPromise, settings, uiElements, hideInitialUI, sessionId, abortController) {
     const { statusElement, spinnerElement, resultsContainer, statusContainer } = uiElements;
@@ -6,16 +6,16 @@ export async function handleAnalysisFlow(getEmlDataPromise, settings, uiElements
         // 1. Set up the initial UI for analysis
         hideInitialUI();
         if (statusContainer) statusContainer.style.display = "flex";
-        if (statusElement) statusElement.innerText = "Starting analysis...";
+        if (statusElement) statusElement.innerText = "Starting analysis…";
         const effectiveSettings = settings || {};
         if (resultsContainer) initializeUI(resultsContainer.id, sessionId, effectiveSettings);
 
         // 2. Fetch the EML data using the provided function
-        if (statusElement) statusElement.innerText = "Fetching email data...";
+        if (statusElement) statusElement.innerText = "Fetching email…";
         const finalEmlToSend = await getEmlDataPromise();
 
         // 3. Perform the streaming analysis
-        if (statusElement) statusElement.innerText = "Analyzing ...";
+        if (statusElement) statusElement.innerText = "Analysis running";
         if (spinnerElement) spinnerElement.style.display = "block";
 
         // Pass settings to streamAnalysis
@@ -26,7 +26,7 @@ export async function handleAnalysisFlow(getEmlDataPromise, settings, uiElements
 
         // 4. Finalize the UI
         if (spinnerElement) spinnerElement.style.display = "none";
-        if (statusElement) statusElement.innerText = "Analysis complete.";
+        if (statusElement) statusElement.innerText = "Analysis complete";
 
     } catch (error) {
         // Don't show error UI when the analysis was intentionally aborted (user navigated away)
@@ -36,8 +36,8 @@ export async function handleAnalysisFlow(getEmlDataPromise, settings, uiElements
         }
         // Universal error handling for real errors
         if (spinnerElement) spinnerElement.style.display = "none";
-        if (statusElement) statusElement.innerText = `Error: ${error.message}`;
+        if (statusElement) statusElement.innerText = "Analysis failed";
         console.error(error);
-        if (resultsContainer) resultsContainer.innerHTML = `<p style="color: red;">An error occurred during analysis. Please try again.</p>`;
+        if (resultsContainer) showAnalysisError(resultsContainer.id, error.message, sessionId);
     }
 }

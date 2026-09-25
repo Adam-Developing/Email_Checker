@@ -1,3 +1,7 @@
 /target
 /Backend/.env
 /Frontend/chrome-extension/manifest.json
+.idea/
+.playwright-mcp/
+mcp-config.json
+*.exe~

@@ -1,86 +1,171 @@
-/* Modal container that covers the whole screen */
+@keyframes ec-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* Modal backdrop that covers the whole screen */
 .analysis-modal-overlay {
     position: fixed;
     top: 0;
     left: 0;
     width: 100%;
     height: 100%;
-    background-color: rgba(0, 0, 0, 0.6);
+    box-sizing: border-box;
+    padding: 24px 16px;
+    overflow-y: auto;
+    background-color: rgba(16, 20, 26, 0.62);
     z-index: 10000;
     display: flex;
     justify-content: center;
-    align-items: center;
+    align-items: flex-start;
 }
 
-/* The actual modal window */
+/* The modal window */
 .analysis-modal-content {
-    background: #f7f9fc;
-    border-radius: 8px;
-    box-shadow: 0 5px 15px rgba(0,0,0,0.3);
-    width: 90%;
-    max-width: 600px;
-    max-height: 90vh;
-    overflow-y: auto;
+    width: 100%;
+    max-width: 560px;
+    background: #fff;
+    border-radius: 14px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+    overflow: hidden;
     position: relative;
-}
-
-/* Close button for the modal */
-.analysis-modal-close {
-    position: absolute;
-    top: 10px;
-    right: 15px;
-    font-size: 28px;
-    font-weight: bold;
-    color: #888;
-    cursor: pointer;
-}
-.analysis-modal-close:hover {
+    animation: ec-rise .28s ease both;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     color: #333;
 }
 
-/* Style for the score circle */
-.email-score-circle {
+/* Verdict badge next to the sender */
+.ec-badge {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    color: white;
-    font-weight: bold;
-    font-size: 14px;
-    margin-left: 10px;
-    margin-right: 8px;
-    flex-shrink: 0;
-    cursor: pointer;
+    gap: 9px;
+    margin: 0 8px 0 10px;
+    padding: 8px 14px 8px 10px;
+    border: 1px solid #dfe3e8;
+    border-radius: 999px;
+    background: #f1f3f4;
+    color: #5f6368;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.15;
+    letter-spacing: normal;
+    text-align: left;
+    white-space: nowrap;
     vertical-align: middle;
+    cursor: pointer;
+    animation: ec-rise .25s ease both;
 }
 
-.email-score-circle.loading {
-    background-color: #ccc;
-    animation: pulse 1.5s infinite;
+.ec-badge-dot {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 700;
+    color: #fff;
 }
 
-.email-score-circle.low-score {
-    background-color: #d94848; /* Red */
+.ec-badge-text {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    line-height: 1.15;
 }
 
-.email-score-circle.medium-score {
-    background-color: #f5a623; /* Orange */
+.ec-badge-label {
+    font-size: 13px;
+    font-weight: 700;
 }
 
-.email-score-circle.high-score {
-    background-color: #0d8a4f; /* Green */
+.ec-badge-sub {
+    font-size: 11px;
+    opacity: .8;
 }
 
-@keyframes pulse {
-    0% {
-        opacity: 1;
-    }
-    50% {
-        opacity: 0.5;
-    }
-    100% {
-        opacity: 1;
-    }
+/* Scam warning shown above a high-risk email */
+.ec-interstitial {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    margin: 0 0 20px 0;
+    padding: 26px 24px;
+    border: 2px solid #d94848;
+    border-radius: 10px;
+    background: #fdeeee;
+    text-align: center;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    animation: ec-rise .3s ease both;
+}
+
+.ec-interstitial-icon {
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    background: #d94848;
+    color: #fff;
+    font-size: 26px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.ec-interstitial-title {
+    font-size: 24px;
+    font-weight: 700;
+    color: #8f1d1d;
+    line-height: 1.2;
+}
+
+.ec-interstitial-body {
+    font-size: 15px;
+    color: #6d2020;
+    max-width: 440px;
+    line-height: 1.5;
+}
+
+.ec-interstitial-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 4px;
+}
+
+.ec-btn-danger,
+.ec-btn-quiet {
+    font-family: inherit;
+    font-size: 14px;
+    padding: 11px 18px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.ec-btn-danger {
+    border: none;
+    background: #d94848;
+    color: #fff;
+    font-weight: 700;
+}
+
+.ec-btn-quiet {
+    border: 1px solid #d3b3b3;
+    background: #fff;
+    color: #8f1d1d;
+    font-weight: 600;
+}
+
+/* Body of a high-risk email, blurred behind the warning until dismissed */
+.ec-blur-target {
+    transition: filter .25s ease;
+}
+
+.ec-blurred {
+    filter: blur(6px);
+    user-select: none;
+    pointer-events: none;
 }

@@ -28,9 +28,13 @@
     {
       "resources": [
         "analysis-ui.html",
+        "assets/Icon.png",
         "core/shared-styles.css",
         "core/analysis-ui-flow.js",
-        "core/analysis-core.js"
+        "core/analysis-core.js",
+        "core/report-model.js",
+        "core/verdict-panel.js",
+        "core/cache-manager.js"
       ],
       "matches": [
         "https://mail.google.com/*"
