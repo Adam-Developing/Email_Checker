@@ -346,6 +346,16 @@
     background: #fffafa;
     border-color: #fee2e2;
 }
+.ec-point-row.is-untested {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+.ec-point-row.is-untested .ec-point-name {
+    color: #475569;
+}
+.ec-point-row.is-untested .ec-point-desc {
+    color: #64748b;
+}
 .ec-point-row.is-gained {
     background: #fbfdfc;
     border-color: #e2f5ea;
@@ -379,6 +389,13 @@
 .ec-point-pill.is-lost {
     background: #fee2e2;
     color: #b91c1c;
+}
+.ec-point-pill.is-untested {
+    background: #f1f5f9;
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid #cbd5e1;
 }
 .ec-point-pill.is-gained {
     background: #dcfce7;

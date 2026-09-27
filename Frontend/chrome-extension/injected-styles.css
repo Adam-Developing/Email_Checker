@@ -31,13 +31,22 @@
     color: #333;
 }
 
+/* Prevent Gmail sender containers from clipping wrapped or overflowing badges on narrow screens */
+.ec-header-container,
+.ec-header-container .iw,
+.ec-header-container .qu {
+    overflow: visible !important;
+    max-height: none !important;
+    height: auto !important;
+}
+
 /* Verdict badge next to the sender */
 .ec-badge {
     display: inline-flex;
     align-items: center;
-    gap: 9px;
-    margin: 0 8px 0 10px;
-    padding: 8px 14px 8px 10px;
+    gap: 8px;
+    margin: 2px 8px 2px 8px;
+    padding: 5px 12px 5px 9px;
     border: 1px solid #dfe3e8;
     border-radius: 999px;
     background: #f1f3f4;
@@ -51,7 +60,29 @@
     white-space: nowrap;
     vertical-align: middle;
     cursor: pointer;
+    box-sizing: border-box;
+    max-height: 36px;
     animation: ec-rise .25s ease both;
+}
+
+@media (max-width: 900px) {
+    .ec-badge {
+        margin: 3px 6px 3px 2px;
+        padding: 4px 10px 4px 7px;
+        font-size: 12px;
+        gap: 6px;
+    }
+    .ec-badge-dot {
+        width: 18px !important;
+        height: 18px !important;
+        font-size: 11px !important;
+    }
+    .ec-badge-label {
+        font-size: 12px !important;
+    }
+    .ec-badge-sub {
+        font-size: 10px !important;
+    }
 }
 
 .ec-badge-dot {
@@ -136,7 +167,7 @@
     flex-direction: column;
     align-items: center;
     gap: 12px;
-    margin: 0 0 20px 0;
+    margin: 16px 0 20px 0;
     padding: 26px 24px;
     border: 2px solid #d94848;
     border-radius: 10px;

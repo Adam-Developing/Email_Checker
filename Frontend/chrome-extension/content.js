@@ -22,7 +22,7 @@ if (window.top === window.self) {
 
     // Badge looks for states without a verdict. Verdict looks arrive with the analysis report.
     const BADGES = {
-        checking: { label: 'Checking…', sub: 'a few seconds', bg: '#f1f3f4', border: '#dfe3e8', ink: '#5f6368', dot: '#9aa4af', glyph: '⋯' },
+        checking: { label: 'Checking…', sub: '', bg: '#f1f3f4', border: '#dfe3e8', ink: '#5f6368', dot: '#9aa4af', glyph: '⋯' },
         manual: { label: 'Check this email', sub: 'not checked yet', bg: '#f7f9fc', border: '#dfe3e8', ink: '#002B4D', dot: '#002B4D', glyph: '›' },
         auth: { label: 'Permission needed', sub: 'click to allow access', bg: '#f7f9fc', border: '#dfe3e8', ink: '#002B4D', dot: '#002B4D', glyph: '!' },
         error: { label: "Couldn't check", sub: 'click for details', bg: '#f1f3f4', border: '#dfe3e8', ink: '#5f6368', dot: '#9aa4af', glyph: '!' },
@@ -163,6 +163,12 @@ if (window.top === window.self) {
         badge.innerHTML = '<span class="ec-badge-dot"></span><span class="ec-badge-text"><span class="ec-badge-label"></span><span class="ec-badge-sub"></span></span>';
         // Sits after the sender's name and address, outside the name's hover card.
         (fromElement.parentElement || fromElement).appendChild(badge);
+
+        // Prevent Gmail parent containers from clipping the badge on smaller screens
+        const container = fromElement.closest('.c2, .iw, .gE, table.cf.gJ');
+        if (container) {
+            container.classList.add('ec-header-container');
+        }
     }
 
     function setBadge(look, onClick) {
@@ -179,8 +185,12 @@ if (window.top === window.self) {
             dot.textContent = look.glyph;
         }
         badge.querySelector('.ec-badge-label').textContent = look.label;
-        badge.querySelector('.ec-badge-sub').textContent = look.sub;
-        badge.title = `${look.label} — ${look.sub}`;
+        const subEl = badge.querySelector('.ec-badge-sub');
+        if (subEl) {
+            subEl.textContent = look.sub || '';
+            subEl.style.display = look.sub ? '' : 'none';
+        }
+        badge.title = look.sub ? `${look.label} — ${look.sub}` : look.label;
         badge.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();

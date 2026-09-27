@@ -83,8 +83,10 @@ export function renderReportPanel(report) {
 
         const isJustCompleted = report.newlyCompletedKeys && report.newlyCompletedKeys.has(c.key);
         const animClass = isJustCompleted ? "ec-just-completed" : "";
-        const rowClass = c.isGained ? "is-gained" : "is-lost";
-        const pillText = c.isGained ? `+${formatPoints(c.points)} pts` : `-${formatPoints(c.lost)} pts`;
+        const rowClass = c.couldNotRun ? "is-untested" : (c.isGained ? "is-gained" : "is-lost");
+        const pillText = c.couldNotRun
+            ? "Not run"
+            : (c.isGained ? `+${formatPoints(c.points)} pts` : `-${formatPoints(c.lost)} pts`);
         return `
             <div class="ec-point-row ${rowClass} ${animClass}" data-key="${escapeHtml(c.key)}">
                 <span class="ec-point-pill ${rowClass} ${animClass}">${pillText}</span>

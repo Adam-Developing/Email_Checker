@@ -147,7 +147,8 @@ function gatherFacts(results) {
 
     const realismKnown = ran.filter((a) => a.data.realismAnalysis);
     const unrealistic = realismKnown.filter((a) => !a.data.realismAnalysis.isRealistic);
-    const realismReason = (unrealistic[0] || realismKnown[0])?.data.realismAnalysis.reason || "";
+    const realismReason = ((unrealistic[0] || realismKnown[0])?.data.realismAnalysis.reason || "").trim();
+    const overallAssessment = (ran.find((a) => a.data?.overallAssessment)?.data?.overallAssessment || "").trim();
 
     const phones = new Map();
     for (const a of ran) {
@@ -177,7 +178,7 @@ function gatherFacts(results) {
         urls, urlsOn, urlsServerDisabled, maliciousCount, urlErrorCount, urlCount,
         skippedSensitiveCount, skippedSensitiveReasons, skippedReasonSummary, urlMessage,
         attachmentsOn, attachmentFound, attachmentName,
-        realismKnown, unrealistic, realismReason,
+        realismKnown, unrealistic, realismReason, overallAssessment,
         phones, invalidPhones, validPhones, failed,
         isChecking, domainArrived, urlsArrived, attachmentsArrived, contentArrived,
     };
@@ -214,19 +215,20 @@ function buildChecks(f) {
         } else {
             const idPoints = off ? 0 : contentPoints((d) => d.companyIdentification?.scoreImpact);
             const earnedId = Math.max(0, Math.min(MAX.companyIdentified, idPoints));
-            const lostId = Math.max(0, MAX.companyIdentified - earnedId);
+            const lostId = off ? 0 : Math.max(0, MAX.companyIdentified - earnedId);
             const isGained = earnedId > 0;
             checks.push({
                 key: "companyIdentified",
-                title: isGained ? "Organization Identified" : "No Organization Identified",
+                title: isGained ? "Organization Identified" : (off ? "Organization Identified" : "No Organization Identified"),
                 points: earnedId,
                 lost: lostId,
                 max: MAX.companyIdentified,
                 isGained,
+                couldNotRun: off,
                 reason: isGained
                     ? (company ? `Recognized claimed sender as ${company}.` : "Recognized legitimate sender organization.")
                     : (off ? "Analysis could not run." : "No specific organization or company was identified in the email."),
-                severity: 20,
+                severity: off ? 0 : 20,
             });
         }
     }
@@ -443,13 +445,14 @@ function buildChecks(f) {
 
             checks.push({
                 key: "phone",
-                title,
+                title: off ? "Phone Number Validation" : title,
                 points: earnedPhone,
-                lost: lostPhone,
+                lost: off ? 0 : lostPhone,
                 max: MAX.phone,
                 isGained,
+                couldNotRun: off,
                 reason: off ? "Analysis could not run." : reason,
-                severity,
+                severity: off ? 0 : severity,
             });
         }
     }
@@ -609,13 +612,14 @@ function buildChecks(f) {
 
             checks.push({
                 key: "companyVerified",
-                title,
+                title: off ? "Sender Address Verification" : title,
                 points: earnedVer,
-                lost: lostVer,
+                lost: off ? 0 : lostVer,
                 max: MAX.companyVerified,
                 isGained,
+                couldNotRun: off,
                 reason: off ? "Analysis could not run." : reason,
-                severity,
+                severity: off ? 0 : severity,
             });
         }
     }
@@ -636,20 +640,21 @@ function buildChecks(f) {
         } else {
             const realPoints = off ? 0 : contentPoints((d) => d.realismAnalysis?.scoreImpact);
             const earnedReal = Math.max(0, Math.min(MAX.realism, realPoints));
-            const lostReal = Math.max(0, MAX.realism - earnedReal);
-            const cleanRealism = f.realismReason ? truncate(f.realismReason, 120) : "";
+            const lostReal = off ? 0 : Math.max(0, MAX.realism - earnedReal);
+            const cleanRealism = f.realismReason ? truncate(f.realismReason, 200) : "";
             const isGained = earnedReal > 0 && f.unrealistic.length === 0;
             checks.push({
                 key: "realism",
-                title: isGained ? "Legitimate Tone & Content" : "Suspicious or Deceptive Wording",
+                title: isGained ? "Legitimate Tone & Content" : (off ? "Legitimate Tone & Content" : "Suspicious or Deceptive Wording"),
                 points: earnedReal,
                 lost: lostReal,
                 max: MAX.realism,
                 isGained,
+                couldNotRun: off,
                 reason: off
                     ? "Analysis could not run."
                     : (isGained ? "Wording reads naturally with no signs of phishing, manipulation, or urgency." : (cleanRealism || "Uses false urgency, threats, or claims typical of phishing scams.")),
-                severity: isGained ? 0 : 85,
+                severity: off ? 0 : (isGained ? 0 : 85),
             });
         }
     }
@@ -660,8 +665,11 @@ function buildChecks(f) {
 export function buildReport(results) {
     const f = gatherFacts(results);
     const checks = buildChecks(f);
-    const max = results.maxScore || checks.reduce((a, c) => a + c.max, 0) || 95;
-    const earned = Math.round(checks.reduce((a, c) => a + (c.isPending ? 0 : c.points), 0) * 10) / 10;
+    const scorableChecks = checks.filter((c) => !c.couldNotRun);
+    const max = scorableChecks.length > 0
+        ? scorableChecks.reduce((a, c) => a + c.max, 0)
+        : (results.maxScore || 95);
+    const earned = Math.round(scorableChecks.reduce((a, c) => a + (c.isPending ? 0 : c.points), 0) * 10) / 10;
     const pct = max > 0 ? Math.round(Math.max(0, Math.min(100, (earned / max) * 100))) : null;
 
     if (f.isChecking) {
@@ -696,7 +704,18 @@ export function buildReport(results) {
         };
     }
 
-    const verdict = verdictForPercent(pct);
+    let verdict = verdictForPercent(pct);
+
+    const hasMaliciousIndicators = f.impersonation
+        || f.maliciousCount > 0
+        || f.attachmentFound
+        || checks.some((c) => !c.isGained && c.severity >= 70 && !c.couldNotRun);
+
+    if (f.contentOn && f.ran.length === 0 && !hasMaliciousIndicators) {
+        if (verdict === "highrisk" || verdict === "safe") {
+            verdict = "suspicious";
+        }
+    }
 
     if (!verdict) {
         return { verdict: null, pct: null, checks };
@@ -707,22 +726,32 @@ export function buildReport(results) {
     // Build concise, clear summary
     let sub;
     if (verdict === "safe") {
-        sub = f.company && f.verified
+        sub = f.overallAssessment || (f.company && f.verified
             ? `Sender address matches official records for ${f.company}. Passed all security checks.`
-            : "Passed security checks with no phishing or malware indicators detected.";
+            : "Passed security checks with no phishing or malware indicators detected.");
     } else if (verdict === "suspicious") {
-        const topFailed = checks.find((c) => !c.isGained && c.severity >= 50);
-        sub = topFailed
-            ? `Suspicious: ${topFailed.reason}`
-            : "Some checks could not be confirmed. Treat this email with caution.";
+        if (f.contentOn && f.ran.length === 0 && !hasMaliciousIndicators) {
+            sub = "Content analysis could not run. Treat this email with caution.";
+        } else if (f.overallAssessment) {
+            const cleanOverall = f.overallAssessment.replace(/^Suspicious:?\s*/i, "");
+            sub = `Suspicious: ${cleanOverall}`;
+        } else {
+            const topFailed = checks.find((c) => !c.isGained && c.severity >= 50 && !c.couldNotRun);
+            sub = topFailed
+                ? `Suspicious: ${topFailed.reason}`
+                : "Some checks could not be confirmed. Treat this email with caution.";
+        }
     } else {
         // High risk
         if (f.impersonation) {
             sub = `Impersonation detected: sender is imitating ${f.company || f.domain?.matchedDomain}.`;
         } else if (f.maliciousCount > 0) {
             sub = "Dangerous email: contains links flagged as malicious or phishing.";
+        } else if (f.overallAssessment) {
+            const cleanOverall = f.overallAssessment.replace(/^High risk:?\s*/i, "");
+            sub = `High risk: ${cleanOverall}`;
         } else {
-            const topFailed = checks.find((c) => !c.isGained && c.severity >= 70);
+            const topFailed = checks.find((c) => !c.isGained && c.severity >= 70 && !c.couldNotRun);
             sub = topFailed
                 ? `High risk: ${topFailed.reason}`
                 : "Strong signs of phishing or deception detected.";

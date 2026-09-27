@@ -99,6 +99,7 @@ type ContentAnalysisResult struct {
 	Summary               string                      `json:"summary"`
 	RealismAnalysis       RealismAnalysisResult       `json:"realismAnalysis"`
 	ContactMethodAnalysis ContactMethodResult         `json:"contactMethodAnalysis"`
+	OverallAssessment     string                      `json:"overallAssessment,omitempty"`
 	Error                 string                      `json:"error,omitempty"`
 }
 
@@ -144,6 +145,9 @@ func init() {
 	googleSearchAPIKey = os.Getenv("GOOGLE_SEARCH_API_KEY")
 	googleSearchCX = os.Getenv("GOOGLE_SEARCH_CX")
 	mainPrompt = os.Getenv("MAIN_PROMPT")
+	if strings.TrimSpace(mainPrompt) == "" {
+		mainPrompt = "Please identify the claimed organization (or UNKNOWN if none), and summarize what the sender wants in one short sentence. Evaluate whether the email looks authentic using plain, simple, and unambiguous language. Keep all reasons very short and concise (under 15 words). Provide realisticReason explaining the presentation and branding, and provide overallAssessment giving a general, short and concise safety evaluation for the whole email (under 15 words), rather than focusing on a single category."
+	}
 	URLScanAPIKey = os.Getenv("URLSCAN_API_KEY")
 	VTotalAPIKey = os.Getenv("VTotal_API_KEY")
 	isURLScanEnabled = os.Getenv("URLSCAN_ENABLED") == "TRUE"
@@ -467,7 +471,7 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 	if enabledChecks["checkUrls"] {
 		analysisWg.Add(1)
 		activeChecks++
-		go performURLAnalysis(&analysisWg, resultsChan, eventChan, r.Context(), Email, isRerun)
+		go performURLAnalysis(&analysisWg, resultsChan, eventChan, r.Context(), Email)
 	}
 	if enabledChecks["checkAttachments"] {
 		analysisWg.Add(1)
@@ -616,7 +620,7 @@ func performDomainAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, db *sql.DB
 	ch <- CheckResult{EventName: "domainAnalysis", Payload: result}
 }
 
-func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan chan<- CheckResult, rCtx context.Context, Email EmailData, bypassCache bool) {
+func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan chan<- CheckResult, rCtx context.Context, Email EmailData) {
 	defer wg.Done()
 	var check Check
 	for _, c := range AllChecks {
@@ -740,7 +744,7 @@ func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan cha
 		urlWg.Add(1)
 		go func(url string) {
 			defer urlWg.Done()
-			if v, err := checkURLsVTotal(ctx, url, bypassCache); err == nil && v != nil {
+			if v, err := checkURLsVTotal(ctx, url); err == nil && v != nil {
 				verdictsChan <- *v
 				// Stream individual result back to the central event channel
 				eventChan <- CheckResult{
@@ -998,6 +1002,7 @@ func populateContentAnalysis(result *ContentAnalysisResult, whoResult EmailAnaly
 
 	result.RealismAnalysis.IsRealistic = whoResult.Realistic
 	result.RealismAnalysis.Reason = whoResult.RealisticReason
+	result.OverallAssessment = whoResult.OverallAssessment
 	if whoResult.Realistic {
 		for _, c := range AllChecks {
 			if c.Name == "RealismCheck" {
