@@ -1,7 +1,7 @@
 /* global document */
 
 import { createEmptyResults, buildReport } from './report-model.js';
-import { bindPanel, renderNoticePanel, renderReportPanel } from './verdict-panel.js';
+import { bindPanel, renderNoticePanel, renderReportPanel, updateReportPanel, resetPanelState } from './verdict-panel.js';
 import { getCachedAnalysis, saveCachedAnalysis, hashString } from './cache-manager.js';
 
 const DEFAULT_CHECKS = {
@@ -148,6 +148,15 @@ function normalizeContentResult(payload) {
 }
 
 let completedKeys = new Set();
+let updateRafId = null;
+
+function scheduleLiveUI() {
+    if (updateRafId) return;
+    updateRafId = requestAnimationFrame(() => {
+        updateRafId = null;
+        updateLiveUI();
+    });
+}
 
 function updateLiveUI() {
     if (!activeContainerId) return;
@@ -164,7 +173,7 @@ function updateLiveUI() {
     }
     report.newlyCompletedKeys = newlyCompleted;
 
-    container.innerHTML = renderReportPanel(report);
+    updateReportPanel(container, report);
     container.style.display = "block";
 }
 
@@ -172,40 +181,48 @@ const eventHandlers = {
     'maxScore': (payload) => {
         results.maxScore = payload.maxScore;
         if (payload.enabledChecks) results.enabled = { ...results.enabled, ...payload.enabledChecks };
-        updateLiveUI();
+        scheduleLiveUI();
     },
     'domainAnalysis': (payload) => {
         results.domain = payload;
-        updateLiveUI();
+        scheduleLiveUI();
     },
     'urlScanStarted': (payload) => {
         results.urlTotal = payload.total;
-        updateLiveUI();
+        results.urlsToScan = payload.urls || [];
+        if (payload.skippedURLs) {
+            results.skippedURLs = payload.skippedURLs;
+        }
+        scheduleLiveUI();
     },
     'urlScanResult': (payload) => {
         results.urlResults.push(payload);
-        updateLiveUI();
+        scheduleLiveUI();
     },
     'urlAnalysis': (payload) => {
         results.urlAnalysis = payload;
-        updateLiveUI();
+        scheduleLiveUI();
     },
     'executableAnalysis': (payload) => {
         results.attachments = payload;
-        updateLiveUI();
+        scheduleLiveUI();
     },
     'textAnalysis': (payload) => {
         if (payload.error) console.error("Text analysis failed:", payload.error);
         results.text = normalizeContentResult(payload);
-        updateLiveUI();
+        scheduleLiveUI();
     },
     'renderedAnalysis': (payload) => {
         if (payload.error) console.error("Rendered analysis failed:", payload.error);
         results.rendered = normalizeContentResult(payload);
-        updateLiveUI();
+        scheduleLiveUI();
     },
     'finalScores': (payload) => {
         console.log("Final scores received from backend:", payload);
+        if (updateRafId) {
+            cancelAnimationFrame(updateRafId);
+            updateRafId = null;
+        }
         results.final = payload;
         showVerdict();
     }
@@ -227,9 +244,14 @@ function handleStreamEvent(eventName, payload, sessionId) {
 // --- UI Update Functions ---
 
 export function initializeUI(containerId, sessionId, settings = {}) {
+    if (updateRafId) {
+        cancelAnimationFrame(updateRafId);
+        updateRafId = null;
+    }
     activeSessionId = sessionId || newSessionId();
     activeContainerId = containerId;
     completedKeys = new Set();
+    resetPanelState();
     results = createEmptyResults(mergeChecks(settings));
     const container = document.getElementById(containerId);
     if (!container) return;
@@ -239,6 +261,10 @@ export function initializeUI(containerId, sessionId, settings = {}) {
 }
 
 function showVerdict() {
+    if (updateRafId) {
+        cancelAnimationFrame(updateRafId);
+        updateRafId = null;
+    }
     const report = buildReport(results);
     const newlyCompleted = new Set();
     for (const c of report.checks || []) {
@@ -250,16 +276,26 @@ function showVerdict() {
     report.newlyCompletedKeys = newlyCompleted;
 
     const container = activeContainerId ? document.getElementById(activeContainerId) : null;
-    const html = report.verdict
-        ? renderReportPanel(report)
-        : renderNoticePanel({
-            title: "No checks are turned on",
-            sub: "Turn on at least one check in the options to get a verdict for this email.",
-        });
-
+    let html;
     if (container) {
-        container.innerHTML = html;
+        if (report.verdict) {
+            updateReportPanel(container, report);
+            html = container.innerHTML;
+        } else {
+            html = renderNoticePanel({
+                title: "No checks are turned on",
+                sub: "Turn on at least one check in the options to get a verdict for this email.",
+            });
+            container.innerHTML = html;
+        }
         container.style.display = "block";
+    } else {
+        html = report.verdict
+            ? renderReportPanel(report)
+            : renderNoticePanel({
+                title: "No checks are turned on",
+                sub: "Turn on at least one check in the options to get a verdict for this email.",
+            });
     }
 
     if (activeCacheKey && report.verdict) {
@@ -291,6 +327,10 @@ function showVerdict() {
 }
 
 export function showAnalysisError(containerId, message, sessionId) {
+    if (updateRafId) {
+        cancelAnimationFrame(updateRafId);
+        updateRafId = null;
+    }
     if (sessionId && activeSessionId && sessionId !== activeSessionId) return;
     const container = document.getElementById(containerId);
     if (container) {

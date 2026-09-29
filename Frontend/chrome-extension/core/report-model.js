@@ -56,6 +56,8 @@ export function createEmptyResults(enabledChecks = {}) {
         maxScore: null,
         domain: null,
         urlTotal: null,
+        urlsToScan: [],
+        skippedURLs: [],
         urlResults: [],
         urlAnalysis: null,
         attachments: null,
@@ -113,17 +115,48 @@ function gatherFacts(results) {
     for (const v of results.urlAnalysis?.urlVerdicts || []) {
         if (v && v.report) flaggedByReport.set(v.report, v.score);
     }
-    const scannedUrls = (results.urlResults || []).map((r) => ({
-        url: r.url,
-        report: r.report || "",
-        kind: r.error ? "error" : (r.finalDecision ? "malicious" : "clean"),
-        flagged: flaggedByReport.has(r.report) ? flaggedByReport.get(r.report) : null,
-        error: r.error || "",
-    }));
-    const skippedSensitiveCount = results.urlAnalysis?.skippedSensitiveCount || 0;
-    const skippedSensitiveReasons = results.urlAnalysis?.skippedSensitiveReasons || [];
-    const skippedReasonSummary = skippedSensitiveReasons.join(", ");
-    const skippedUrls = (results.urlAnalysis?.skippedURLs || []).map((s) => ({
+    const completedResultsMap = new Map();
+    for (const r of (results.urlResults || [])) {
+        completedResultsMap.set(r.url, {
+            url: r.url,
+            report: r.report || "",
+            kind: r.error ? "error" : (r.finalDecision ? "malicious" : "clean"),
+            flagged: flaggedByReport.has(r.report) ? flaggedByReport.get(r.report) : null,
+            error: r.error || "",
+        });
+    }
+
+    const scannedUrls = [];
+    if (results.urlsToScan && results.urlsToScan.length > 0) {
+        for (const u of results.urlsToScan) {
+            if (completedResultsMap.has(u)) {
+                scannedUrls.push(completedResultsMap.get(u));
+            } else if (!results.urlAnalysis) {
+                scannedUrls.push({
+                    url: u,
+                    report: "",
+                    kind: "pending",
+                    flagged: null,
+                    error: "",
+                });
+            }
+        }
+        for (const [url, item] of completedResultsMap.entries()) {
+            if (!results.urlsToScan.includes(url)) {
+                scannedUrls.push(item);
+            }
+        }
+    } else {
+        scannedUrls.push(...completedResultsMap.values());
+    }
+
+    const skippedSource = (results.urlAnalysis?.skippedURLs && results.urlAnalysis.skippedURLs.length > 0)
+        ? results.urlAnalysis.skippedURLs
+        : (results.skippedURLs || []);
+    const skippedSensitiveCount = results.urlAnalysis?.skippedSensitiveCount || skippedSource.length;
+    const skippedSensitiveReasons = results.urlAnalysis?.skippedSensitiveReasons || skippedSource.map((s) => s.category || "sensitive link");
+    const skippedReasonSummary = Array.from(new Set(skippedSensitiveReasons)).join(", ");
+    const skippedUrls = skippedSource.map((s) => ({
         url: s.url,
         report: "",
         kind: "skipped",
@@ -136,7 +169,7 @@ function gatherFacts(results) {
     const urlsServerDisabled = results.urlAnalysis?.status === "Disabled";
     const maliciousCount = Math.max(results.urlAnalysis?.maliciousCount || 0, urls.filter((u) => u.kind === "malicious").length);
     const urlErrorCount = urls.filter((u) => u.kind === "error").length;
-    const urlCount = Math.max(scannedUrls.length, results.urlTotal || 0);
+    const urlCount = Math.max(scannedUrls.length, results.urlTotal || 0, results.urlsToScan?.length || 0);
     const urlMessage = results.urlAnalysis?.message || "";
 
     const attachmentsOn = on("checkAttachments");
@@ -461,20 +494,44 @@ function buildChecks(f) {
     if (f.urlsOn) {
         if (f.isChecking && !f.urlsArrived) {
             const count = f.urlCount || 0;
-            checks.push({
-                key: "urls",
-                title: "Safe Links",
-                points: 0,
-                lost: 0,
-                max: MAX.urls,
-                isPending: true,
-                reason: count === 0
-                    ? "Scanning links for security threats…"
-                    : count === 1
-                        ? "Scanning 1 link for security threats…"
-                        : `Scanning ${count} links for security threats…`,
-                severity: 0,
-            });
+            const completedCount = (r.urlResults || []).length;
+            if (f.maliciousCount > 0) {
+                const progressText = (count > 0 && completedCount > 0)
+                    ? ` (${completedCount}/${count} checked)…`
+                    : "…";
+                checks.push({
+                    key: "urls",
+                    title: "Dangerous Links Detected",
+                    points: 0,
+                    lost: MAX.urls,
+                    max: MAX.urls,
+                    isGained: false,
+                    isPending: false,
+                    reason: f.maliciousCount === 1
+                        ? `1 dangerous link detected so far${progressText}`
+                        : `${f.maliciousCount} dangerous links detected so far${progressText}`,
+                    severity: 100,
+                });
+            } else {
+                let reason = "Scanning links for security threats…";
+                if (count > 0 && completedCount > 0) {
+                    reason = `Scanning links (${completedCount}/${count} clean so far)…`;
+                } else if (count === 1) {
+                    reason = "Scanning 1 link for security threats…";
+                } else if (count > 1) {
+                    reason = `Scanning ${count} links for security threats…`;
+                }
+                checks.push({
+                    key: "urls",
+                    title: "Safe Links",
+                    points: 0,
+                    lost: 0,
+                    max: MAX.urls,
+                    isPending: true,
+                    reason,
+                    severity: 0,
+                });
+            }
         } else {
             const earnedUrl = Math.max(0, Math.min(MAX.urls, r.urlAnalysis?.scoreImpact || 0));
             const lostUrl = Math.max(0, MAX.urls - earnedUrl);
@@ -694,7 +751,7 @@ export function buildReport(results) {
                 kind: u.kind,
                 url: u.url,
                 report: /^https:\/\/www\.virustotal\.com\//.test(u.report) ? u.report : "",
-                engines: u.kind === "error" ? "failed" : u.kind === "skipped" ? "skipped" : `${u.flagged || 0} flagged`,
+                engines: u.kind === "error" ? "failed" : u.kind === "skipped" ? "skipped" : u.kind === "pending" ? "scanning" : `${u.flagged || 0} flagged`,
                 reason: u.reason || "",
             })),
             urlsOn: f.urlsOn,
@@ -798,7 +855,7 @@ export function buildReport(results) {
             kind: u.kind,
             url: u.url,
             report: /^https:\/\/www\.virustotal\.com\//.test(u.report) ? u.report : "",
-            engines: u.kind === "error" ? "failed" : u.kind === "skipped" ? "skipped" : `${u.flagged || 0} flagged`,
+            engines: u.kind === "error" ? "failed" : u.kind === "skipped" ? "skipped" : u.kind === "pending" ? "scanning" : `${u.flagged || 0} flagged`,
             reason: u.reason || "",
         })),
         urlsOn: f.urlsOn,

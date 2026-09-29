@@ -4,4 +4,9 @@
 .idea/
 .playwright-mcp/
 mcp-config.json
+*.exe
 *.exe~
+Backend/tessdata/
+Backend/doc/
+/wikidata_websites4.db
+*.eml

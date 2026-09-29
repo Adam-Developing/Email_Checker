@@ -1,0 +1,48 @@
+# Shared Hosting, Object Storage, and Dynamic Tunnel Domains
+# Domains listed here allow arbitrary user content/uploads and are not fast-pathed based solely on domain reputation.
+# Empty lines and lines starting with '#' are ignored.
+
+# Cloud Object & File Storage
+s3.amazonaws.com
+blob.core.windows.net
+storage.googleapis.com
+linodeobjects.com
+dropbox.com
+drive.google.com
+1drv.ms
+onedrive.live.com
+sharepoint.com
+
+# Forms & Documents
+forms.gle
+docs.google.com
+sites.google.com
+
+# Static Hosting & Serverless App Platforms
+firebaseapp.com
+web.app
+pages.dev
+workers.dev
+github.io
+gitlab.io
+vercel.app
+netlify.app
+render.com
+herokuapp.com
+surge.sh
+000webhostapp.com
+weebly.com
+wixsite.com
+blogspot.com
+wordpress.com
+glitch.me
+repl.co
+
+# Tunnels & Dynamic DNS
+ngrok.io
+ngrok-free.app
+loca.lt
+trycloudflare.com
+duckdns.org
+no-ip.com
+linodeusercontent.com

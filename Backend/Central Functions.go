@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -1128,19 +1130,21 @@ func getURL(emailText string) []string {
 }
 
 func getFinalURL(ctx context.Context, start string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, start, nil)
+	redirectCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(redirectCtx, http.MethodGet, start, nil)
 	if err != nil {
-		return "", err
+		return start, err
 	}
 
-	// Use your client with default headers
+	// Use client with default headers and sane timeout
 	client := newClientWithDefaultHeaders()
-	// Add a sane timeout (your helper doesn't set one)
-	client.Timeout = 15 * time.Second
+	client.Timeout = 6 * time.Second
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return start, err
 	}
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
@@ -1148,13 +1152,15 @@ func getFinalURL(ctx context.Context, start string) (string, error) {
 			log.Printf("Error closing response body: %v", err)
 		}
 	}(resp.Body)
-	_, err = io.Copy(io.Discard, resp.Body)
-	if err != nil {
-		return "", err
-	}
+
+	// Discard up to 2KB to allow connection reuse without downloading entire payload
+	_, _ = io.CopyN(io.Discard, resp.Body, 2048)
 
 	// After redirects, this is the final URL
-	return resp.Request.URL.String(), nil
+	if final := resp.Request.URL.String(); final != "" {
+		return final, nil
+	}
+	return start, nil
 }
 
 func checkURLs(ctx context.Context, u string, bypassCache bool) (*Verdict, error) {
@@ -1369,22 +1375,295 @@ func checkURLs(ctx context.Context, u string, bypassCache bool) (*Verdict, error
 	}
 }
 
-func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
+type DomainVTStats struct {
+	Harmless   int
+	Malicious  int
+	Suspicious int
+	Undetected int
+}
+
+type vtCacheEntry struct {
+	verdict     *Verdict
+	domainStats *DomainVTStats
+	timestamp   time.Time
+}
+
+var (
+	vtCacheMu sync.RWMutex
+	vtCache   = make(map[string]vtCacheEntry)
+)
+
+const vtCacheTTL = 6 * time.Hour
+
+func getFromVTCache(key string) (*Verdict, *DomainVTStats, bool) {
+	vtCacheMu.RLock()
+	defer vtCacheMu.RUnlock()
+	entry, exists := vtCache[key]
+	if !exists {
+		return nil, nil, false
+	}
+	if time.Since(entry.timestamp) > vtCacheTTL {
+		return nil, nil, false
+	}
+	return entry.verdict, entry.domainStats, true
+}
+
+func setInVTCache(key string, v *Verdict, stats *DomainVTStats) {
+	vtCacheMu.Lock()
+	defer vtCacheMu.Unlock()
+	vtCache[key] = vtCacheEntry{
+		verdict:     v,
+		domainStats: stats,
+		timestamp:   time.Now(),
+	}
+}
+
+//go:embed shared_hosting_domains.txt
+var defaultSharedHostingDomains string
+
+var (
+	sharedHostingDomainsMu sync.RWMutex
+	sharedHostingDomains   = make(map[string]struct{})
+)
+
+func init() {
+	loadSharedHostingDomains()
+}
+
+func parseSharedHostingDomains(content string) map[string]struct{} {
+	m := make(map[string]struct{})
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if idx := strings.Index(line, "#"); idx != -1 {
+			line = strings.TrimSpace(line[:idx])
+		}
+		if line != "" {
+			m[strings.ToLower(line)] = struct{}{}
+		}
+	}
+	return m
+}
+
+func findSharedHostingFile() string {
+	if envPath := strings.TrimSpace(os.Getenv("SHARED_HOSTING_DOMAINS_FILE")); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			return envPath
+		}
+	}
+
+	candidates := []string{
+		"shared_hosting_domains.txt",
+		filepath.Join("Backend", "shared_hosting_domains.txt"),
+		filepath.Join("..", "shared_hosting_domains.txt"),
+	}
+
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "shared_hosting_domains.txt"),
+			filepath.Join(exeDir, "Backend", "shared_hosting_domains.txt"),
+		)
+	}
+
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ""
+}
+
+func loadSharedHostingDomains() {
+	sharedHostingDomainsMu.Lock()
+	defer sharedHostingDomainsMu.Unlock()
+
+	filePath := findSharedHostingFile()
+	if filePath != "" {
+		if data, err := os.ReadFile(filePath); err == nil && len(data) > 0 {
+			sharedHostingDomains = parseSharedHostingDomains(string(data))
+			log.Printf("Loaded %d shared hosting domains from %s", len(sharedHostingDomains), filePath)
+			return
+		}
+	}
+
+	if defaultSharedHostingDomains != "" {
+		sharedHostingDomains = parseSharedHostingDomains(defaultSharedHostingDomains)
+		log.Printf("Loaded %d default shared hosting domains from embedded configuration", len(sharedHostingDomains))
+	}
+}
+
+func isSharedHostingDomain(d string) bool {
+	sharedHostingDomainsMu.RLock()
+	defer sharedHostingDomainsMu.RUnlock()
+
+	d = strings.ToLower(strings.TrimSpace(d))
+	if d == "" {
+		return false
+	}
+
+	if _, ok := sharedHostingDomains[d]; ok {
+		return true
+	}
+
+	for shared := range sharedHostingDomains {
+		if strings.HasSuffix(d, "."+shared) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func submitURLInBackground(u string) {
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		submitURL := "https://www.virustotal.com/api/v3/urls"
+		form := url.Values{}
+		form.Add("url", u)
+		body := strings.NewReader(form.Encode())
+
+		submitReq, err := http.NewRequestWithContext(bgCtx, "POST", submitURL, body)
+		if err != nil {
+			return
+		}
+		submitReq.Header.Set("x-apikey", VTotalAPIKey)
+		submitReq.Header.Set("content-type", "application/x-www-form-urlencoded")
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		submitRes, err := client.Do(submitReq)
+		if err != nil {
+			return
+		}
+		defer func(Body io.ReadCloser) {
+			_ = Body.Close()
+		}(submitRes.Body)
+		_, _ = io.CopyN(io.Discard, submitRes.Body, 1024)
+	}()
+}
+
+func checkDomainVTotal(ctx context.Context, domain string) (*Verdict, *DomainVTStats, int, error) {
+	if VTotalAPIKey == "" {
+		return nil, nil, 0, fmt.Errorf("VTotal_API_KEY not set")
+	}
+
+	cleanDomain := strings.ToLower(strings.TrimSpace(domain))
+	if cleanDomain == "" {
+		return nil, nil, 0, fmt.Errorf("empty domain")
+	}
+
+	cacheKey := "domain:" + cleanDomain
+	if v, stats, ok := getFromVTCache(cacheKey); ok {
+		return v, stats, http.StatusOK, nil
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
+	apiURL := fmt.Sprintf("https://www.virustotal.com/api/v3/domains/%s", url.PathEscape(cleanDomain))
+	req, err := http.NewRequestWithContext(queryCtx, "GET", apiURL, nil)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	req.Header.Set("x-apikey", VTotalAPIKey)
+	req.Header.Set("accept", "application/json")
+
+	client := &http.Client{Timeout: 8 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("failed to query VT domain: %w", err)
+	}
+	defer func(Body io.ReadCloser) {
+		_ = Body.Close()
+	}(res.Body)
+
+	if res.StatusCode != http.StatusOK {
+		return nil, nil, res.StatusCode, nil
+	}
+
+	var result struct {
+		Data struct {
+			Attributes struct {
+				LastAnalysisStats struct {
+					Harmless   int `json:"harmless"`
+					Malicious  int `json:"malicious"`
+					Suspicious int `json:"suspicious"`
+					Undetected int `json:"undetected"`
+				} `json:"last_analysis_stats"`
+				Categories map[string]string `json:"categories"`
+				Reputation int               `json:"reputation"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		return nil, nil, res.StatusCode, fmt.Errorf("decode VT domain result: %w", err)
+	}
+
+	stats := result.Data.Attributes.LastAnalysisStats
+	score := stats.Malicious + stats.Suspicious
+	malicious := stats.Malicious > 0
+	finalDecision := malicious || score > 0
+
+	cats := []string{}
+	for _, c := range result.Data.Attributes.Categories {
+		if c != "" {
+			cats = append(cats, c)
+		}
+	}
+
+	reportURL := fmt.Sprintf("https://www.virustotal.com/gui/domain/%s", cleanDomain)
+	verdict := &Verdict{
+		Score:           score,
+		Cats:            cats,
+		Report:          reportURL,
+		PlatformVerdict: malicious,
+		FinalDecision:   finalDecision,
+	}
+
+	domainStats := &DomainVTStats{
+		Harmless:   stats.Harmless,
+		Malicious:  stats.Malicious,
+		Suspicious: stats.Suspicious,
+		Undetected: stats.Undetected,
+	}
+
+	setInVTCache(cacheKey, verdict, domainStats)
+	return verdict, domainStats, http.StatusOK, nil
+}
+
+func checkURLsVTotal(ctx context.Context, u string, bypassCacheOpt ...bool) (*Verdict, error) {
 	if VTotalAPIKey == "" {
 		return nil, fmt.Errorf("VTotal_API_KEY not set")
 	}
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	bypassCache := false
+	if len(bypassCacheOpt) > 0 {
+		bypassCache = bypassCacheOpt[0]
+	}
 
-	// 1. Encode the URL in base64 (VT format requirement)
-	// VT requires strictly no padding '=' for the ID
+	cacheKey := "url:" + u
+	if !bypassCache {
+		if cached, _, ok := getFromVTCache(cacheKey); ok {
+			log.Printf("Found in-memory cached scan for %s. Using cached result.", u)
+			return cached, nil
+		}
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// 1. Encode the URL in base64 (VT format requirement, no padding)
 	encodedURL := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(u))
 
-	// Helper to submit a fresh scan to VT and poll for results
+	// Helper to submit a fresh scan to VT and poll for results (bounded by timeout)
 	submitAndPoll := func() (*Verdict, error) {
 		log.Printf("Submitting new scan to VirusTotal for %s...", u)
 		submitURL := "https://www.virustotal.com/api/v3/urls"
-		// VT expects "url=..." form data
 		form := url.Values{}
 		form.Add("url", u)
 		body := strings.NewReader(form.Encode())
@@ -1401,23 +1680,17 @@ func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
 			return nil, fmt.Errorf("failed to submit URL: %w", err)
 		}
 		defer func(Body io.ReadCloser) {
-			err := Body.Close()
-			if err != nil {
-				log.Printf("Error closing response body: %v", err)
-			}
+			_ = Body.Close()
 		}(submitRes.Body)
 
 		if submitRes.StatusCode != http.StatusOK && submitRes.StatusCode != http.StatusCreated {
-			b, err := io.ReadAll(submitRes.Body)
-			if err != nil {
-				return nil, fmt.Errorf("submit error: %s (failed to read body: %v)", submitRes.Status, err)
-			}
-			return nil, fmt.Errorf("submit error: %s", string(b))
+			b, _ := io.ReadAll(submitRes.Body)
+			return nil, fmt.Errorf("submit error: %s: %s", submitRes.Status, string(b))
 		}
 
 		var submitData struct {
 			Data struct {
-				ID string `json:"id"` // This is the ANALYSIS ID
+				ID string `json:"id"`
 			} `json:"data"`
 		}
 		if err := json.NewDecoder(submitRes.Body).Decode(&submitData); err != nil {
@@ -1427,106 +1700,163 @@ func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
 		analysisID := submitData.Data.ID
 		log.Printf("Scan submitted. Polling Analysis ID: %s...", analysisID)
 
-		// 3. Poll the analysis result using the ANALYSIS ID
 		pollURL := fmt.Sprintf("https://www.virustotal.com/api/v3/analyses/%s", analysisID)
-		ticker := time.NewTicker(5 * time.Second)
+		pollCtx, cancelPoll := context.WithTimeout(ctx, 10*time.Second)
+		defer cancelPoll()
+
+		// Initial check after 1.5s
+		select {
+		case <-pollCtx.Done():
+			reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL)
+			return &Verdict{
+				Score:           0,
+				Cats:            []string{},
+				Report:          reportURL,
+				PlatformVerdict: false,
+				FinalDecision:   false,
+			}, nil
+		case <-time.After(1500 * time.Millisecond):
+		}
+
+		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
 		for {
-			select {
-			case <-ctx.Done():
-				return nil, fmt.Errorf("polling cancelled: %w", ctx.Err())
-			case <-ticker.C:
-				pollReq, err := http.NewRequestWithContext(ctx, "GET", pollURL, nil)
-				if err != nil {
-					return nil, err
-				}
-				pollReq.Header.Set("x-apikey", VTotalAPIKey)
-
-				pollRes, err := client.Do(pollReq)
-				if err != nil {
-					log.Printf("poll failed, retrying: %v", err)
-					continue
-				}
-
-				// Read body explicitly to handle closing
-				bodyBytes, err := io.ReadAll(pollRes.Body)
-				if err != nil {
-					log.Printf("Failed to read poll response body: %v", err)
-					_ = pollRes.Body.Close()
-					continue
-				}
-				err = pollRes.Body.Close()
-				if err != nil {
-					return nil, err
-				}
-
-				if pollRes.StatusCode == http.StatusNotFound {
-					log.Printf("analysis not ready, retrying...")
-					continue
-				}
-
-				if pollRes.StatusCode != http.StatusOK {
-					return nil, fmt.Errorf("poll error: %s", string(bodyBytes))
-				}
-
-				var result struct {
-					Data struct {
-						Attributes struct {
-							Status string `json:"status"`
-							Stats  struct {
-								Harmless   int `json:"harmless"`
-								Malicious  int `json:"malicious"`
-								Suspicious int `json:"suspicious"`
-								Undetected int `json:"undetected"`
-							} `json:"stats"`
-							Results map[string]struct {
-								Category string `json:"category"`
-							} `json:"results"`
-						} `json:"attributes"`
-					} `json:"data"`
-				}
-
-				if err := json.Unmarshal(bodyBytes, &result); err != nil {
-					return nil, fmt.Errorf("decode result: %w", err)
-				}
-
-				if result.Data.Attributes.Status != "completed" {
-					log.Println("scan still running, waiting...")
-					continue
-				}
-
-				// Build final verdict
-				score := result.Data.Attributes.Stats.Malicious + result.Data.Attributes.Stats.Suspicious
-				cats := []string{}
-				for _, r := range result.Data.Attributes.Results {
-					if r.Category != "undetected" {
-						cats = append(cats, r.Category)
-					}
-				}
-
-				malicious := result.Data.Attributes.Stats.Malicious > 0
-				finalDecision := malicious || score > 0
-				reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL) // GUI still uses the URL ID
-
-				return &Verdict{
-					Score:           score,
-					Cats:            cats,
-					Report:          reportURL,
-					PlatformVerdict: malicious,
-					FinalDecision:   finalDecision,
-				}, nil
+			pollReq, err := http.NewRequestWithContext(pollCtx, "GET", pollURL, nil)
+			if err != nil {
+				return nil, err
 			}
+			pollReq.Header.Set("x-apikey", VTotalAPIKey)
+
+			pollRes, err := client.Do(pollReq)
+			if err != nil {
+				log.Printf("poll failed, retrying: %v", err)
+				select {
+				case <-pollCtx.Done():
+					reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL)
+					return &Verdict{
+						Score:           0,
+						Cats:            []string{},
+						Report:          reportURL,
+						PlatformVerdict: false,
+						FinalDecision:   false,
+					}, nil
+				case <-ticker.C:
+					continue
+				}
+			}
+
+			bodyBytes, err := io.ReadAll(pollRes.Body)
+			_ = pollRes.Body.Close()
+			if err != nil {
+				log.Printf("Failed to read poll response body: %v", err)
+				select {
+				case <-pollCtx.Done():
+					reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL)
+					return &Verdict{
+						Score:           0,
+						Cats:            []string{},
+						Report:          reportURL,
+						PlatformVerdict: false,
+						FinalDecision:   false,
+					}, nil
+				case <-ticker.C:
+					continue
+				}
+			}
+
+			if pollRes.StatusCode == http.StatusNotFound {
+				log.Printf("analysis not ready, retrying...")
+				select {
+				case <-pollCtx.Done():
+					reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL)
+					return &Verdict{
+						Score:           0,
+						Cats:            []string{},
+						Report:          reportURL,
+						PlatformVerdict: false,
+						FinalDecision:   false,
+					}, nil
+				case <-ticker.C:
+					continue
+				}
+			}
+
+			if pollRes.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("poll error: %s", string(bodyBytes))
+			}
+
+			var result struct {
+				Data struct {
+					Attributes struct {
+						Status string `json:"status"`
+						Stats  struct {
+							Harmless   int `json:"harmless"`
+							Malicious  int `json:"malicious"`
+							Suspicious int `json:"suspicious"`
+							Undetected int `json:"undetected"`
+						} `json:"stats"`
+						Results map[string]struct {
+							Category string `json:"category"`
+						} `json:"results"`
+					} `json:"attributes"`
+				} `json:"data"`
+			}
+
+			if err := json.Unmarshal(bodyBytes, &result); err != nil {
+				return nil, fmt.Errorf("decode result: %w", err)
+			}
+
+			if result.Data.Attributes.Status != "completed" {
+				log.Printf("scan for %s still running, waiting...", u)
+				select {
+				case <-pollCtx.Done():
+					log.Printf("VirusTotal analysis for %s timed out after 10s. Returning pending status.", u)
+					reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL)
+					return &Verdict{
+						Score:           0,
+						Cats:            []string{},
+						Report:          reportURL,
+						PlatformVerdict: false,
+						FinalDecision:   false,
+					}, nil
+				case <-ticker.C:
+					continue
+				}
+			}
+
+			// Build final verdict
+			score := result.Data.Attributes.Stats.Malicious + result.Data.Attributes.Stats.Suspicious
+			cats := []string{}
+			for _, r := range result.Data.Attributes.Results {
+				if r.Category != "undetected" && r.Category != "" {
+					cats = append(cats, r.Category)
+				}
+			}
+
+			malicious := result.Data.Attributes.Stats.Malicious > 0
+			finalDecision := malicious || score > 0
+			reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL)
+
+			v := &Verdict{
+				Score:           score,
+				Cats:            cats,
+				Report:          reportURL,
+				PlatformVerdict: malicious,
+				FinalDecision:   finalDecision,
+			}
+			setInVTCache(cacheKey, v, nil)
+			return v, nil
 		}
 	}
 
 	// Helper to fetch an existing cached report from VT
-	getExistingReport := func() (*Verdict, int, error) {
-		fallbackCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	getExistingReport := func(targetEncoded string) (*Verdict, int, error) {
+		queryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		defer cancel()
 
-		apiURL := fmt.Sprintf("https://www.virustotal.com/api/v3/urls/%s", encodedURL)
-		req, err := http.NewRequestWithContext(fallbackCtx, "GET", apiURL, nil)
+		apiURL := fmt.Sprintf("https://www.virustotal.com/api/v3/urls/%s", targetEncoded)
+		req, err := http.NewRequestWithContext(queryCtx, "GET", apiURL, nil)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -1538,10 +1868,7 @@ func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
 			return nil, 0, fmt.Errorf("failed to query VT: %w", err)
 		}
 		defer func(Body io.ReadCloser) {
-			err := Body.Close()
-			if err != nil {
-				log.Printf("Error closing response body: %v", err)
-			}
+			_ = Body.Close()
 		}(res.Body)
 
 		if res.StatusCode == http.StatusOK {
@@ -1575,7 +1902,7 @@ func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
 
 			malicious := result.Data.Attributes.LastAnalysisStats.Malicious > 0
 			finalDecision := malicious || score > 0
-			reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL)
+			reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", targetEncoded)
 
 			return &Verdict{
 				Score:           score,
@@ -1589,25 +1916,101 @@ func checkURLsVTotal(ctx context.Context, u string) (*Verdict, error) {
 		return nil, res.StatusCode, nil
 	}
 
-	// Always check for an existing report first (even on rerun) to avoid long polling delays on known URLs
-	verdict, statusCode, err := getExistingReport()
+	// 2. Check for an existing report for the full URL
+	verdict, statusCode, err := getExistingReport(encodedURL)
 	if err != nil {
-		return nil, err
+		log.Printf("Querying existing VT scan for %s: %v", u, err)
 	}
 	if statusCode == http.StatusOK && verdict != nil {
 		log.Printf("Found existing scan for %s on VirusTotal. Using cached result.", u)
+		setInVTCache(cacheKey, verdict, nil)
 		return verdict, nil
 	}
 
+	// 3. If exact URL not found (404), check if base URL or domain reputation can resolve it quickly
 	if statusCode == http.StatusNotFound {
-		log.Printf("No prior scan found for %s — submitting new scan...", u)
+		parsed, parseErr := url.Parse(u)
+		var host, rootDomain string
+		if parseErr == nil {
+			host = strings.ToLower(parsed.Hostname())
+			if rDomain, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
+				rootDomain = strings.ToLower(rDomain)
+			} else {
+				rootDomain = host
+			}
+
+			// Check base URL if query parameters exist
+			if parsed.RawQuery != "" || parsed.Fragment != "" {
+				baseURLStr := fmt.Sprintf("%s://%s%s", parsed.Scheme, parsed.Host, parsed.Path)
+				if baseURLStr != u {
+					baseEncoded := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(baseURLStr))
+					if baseVerdict, baseStatus, _ := getExistingReport(baseEncoded); baseStatus == http.StatusOK && baseVerdict != nil {
+						log.Printf("Found existing scan for base URL %s on VirusTotal. Using result for %s.", baseURLStr, u)
+						baseVerdict.Report = fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL)
+						setInVTCache(cacheKey, baseVerdict, nil)
+						return baseVerdict, nil
+					}
+				}
+			}
+		}
+
+		// Check if host / root domain is a shared hosting or dynamic tunnel service
+		isSharedHosting := false
+		if host != "" {
+			if isSharedHostingDomain(host) || isSharedHostingDomain(rootDomain) {
+				isSharedHosting = true
+			}
+		}
+
+		// Fast path: Domain reputation check for standard corporate/organizational domains
+		if host != "" && !isSharedHosting {
+			domainVerdict, domainStats, domainStatus, _ := checkDomainVTotal(ctx, host)
+			// If subdomain not found on VT or has 0 votes, try root domain
+			if (domainStatus != http.StatusOK || (domainStats != nil && domainStats.Harmless == 0 && domainStats.Malicious == 0)) && rootDomain != "" && rootDomain != host {
+				if rVerdict, rStats, rStatus, _ := checkDomainVTotal(ctx, rootDomain); rStatus == http.StatusOK && rVerdict != nil {
+					domainVerdict = rVerdict
+					domainStats = rStats
+					domainStatus = rStatus
+				}
+			}
+
+			if domainStatus == http.StatusOK && domainVerdict != nil && domainStats != nil {
+				// If domain is clean and established on VirusTotal (at least 1 harmless vote, 0 malicious, 0 suspicious)
+				if domainStats.Harmless >= 1 && domainStats.Malicious == 0 && domainStats.Suspicious == 0 {
+					log.Printf("Domain %s is verified clean on VirusTotal (%d harmless engines). Using domain reputation and queuing background scan for %s.", host, domainStats.Harmless, u)
+					submitURLInBackground(u)
+
+					cleanVerdict := &Verdict{
+						Score:           0,
+						Cats:            domainVerdict.Cats,
+						Report:          fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL),
+						PlatformVerdict: false,
+						FinalDecision:   false,
+					}
+					setInVTCache(cacheKey, cleanVerdict, nil)
+					return cleanVerdict, nil
+				}
+
+				// If domain has malicious or suspicious flags on VirusTotal, the full URL is checked fully.
+				if domainVerdict.FinalDecision || domainStats.Malicious > 0 || domainStats.Suspicious > 0 {
+					log.Printf("Domain %s has malicious/suspicious flags on VirusTotal (malicious: %d, suspicious: %d) — checking full URL %s fully...", host, domainStats.Malicious, domainStats.Suspicious, u)
+					// Fall through to submitAndPoll() so the full URL is checked fully!
+				}
+			}
+		}
+
+		// If domain is shared hosting, has flags, or has 0 reputation on VT (brand new / unknown):
+		// Submit live scan and poll the full URL fully (with 10-second bounded timeout)
+		log.Printf("Checking full URL on VirusTotal for %s...", u)
 		verdict, err := submitAndPoll()
-		if err == nil {
+		if err == nil && verdict != nil {
 			return verdict, nil
 		}
-		// Attempt fallback if polling failed or timed out
-		if fallbackVerdict, _, fallbackErr := getExistingReport(); fallbackErr == nil && fallbackVerdict != nil {
+
+		// Fallback check
+		if fallbackVerdict, _, fallbackErr := getExistingReport(encodedURL); fallbackErr == nil && fallbackVerdict != nil {
 			log.Printf("Successfully fell back to existing VirusTotal report for %s.", u)
+			setInVTCache(cacheKey, fallbackVerdict, nil)
 			return fallbackVerdict, nil
 		}
 		return nil, err

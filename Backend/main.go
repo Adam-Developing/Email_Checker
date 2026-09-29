@@ -35,7 +35,9 @@ type URLScanUpdate struct {
 }
 
 type URLScanStartInfo struct {
-	Total int `json:"total"`
+	Total       int          `json:"total"`
+	Urls        []string     `json:"urls,omitempty"`
+	SkippedURLs []SkippedURL `json:"skippedURLs,omitempty"`
 }
 
 type DomainAnalysisResult struct {
@@ -471,7 +473,7 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 	if enabledChecks["checkUrls"] {
 		analysisWg.Add(1)
 		activeChecks++
-		go performURLAnalysis(&analysisWg, resultsChan, eventChan, r.Context(), Email)
+		go performURLAnalysis(&analysisWg, resultsChan, eventChan, r.Context(), Email, isRerun)
 	}
 	if enabledChecks["checkAttachments"] {
 		analysisWg.Add(1)
@@ -620,7 +622,7 @@ func performDomainAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, db *sql.DB
 	ch <- CheckResult{EventName: "domainAnalysis", Payload: result}
 }
 
-func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan chan<- CheckResult, rCtx context.Context, Email EmailData) {
+func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan chan<- CheckResult, rCtx context.Context, Email EmailData, isRerun bool) {
 	defer wg.Done()
 	var check Check
 	for _, c := range AllChecks {
@@ -722,13 +724,28 @@ func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan cha
 		reasonsStr = "sensitive action"
 	}
 
+	// Follow redirects concurrently for all unique URLs
 	var finalURLsEmail []string
 	finalUniqueURLs := make(map[string]struct{})
+	var resolveMu sync.Mutex
+	var resolveWg sync.WaitGroup
+
 	for u := range uniqueURLs {
-		if final, err := getFinalURL(ctx, u); err == nil && final != "" {
-			finalUniqueURLs[final] = struct{}{}
-		}
+		resolveWg.Add(1)
+		go func(rawURL string) {
+			defer resolveWg.Done()
+			final, err := getFinalURL(ctx, rawURL)
+			resolveMu.Lock()
+			defer resolveMu.Unlock()
+			if err == nil && final != "" {
+				finalUniqueURLs[final] = struct{}{}
+			} else {
+				finalUniqueURLs[rawURL] = struct{}{}
+			}
+		}(u)
 	}
+	resolveWg.Wait()
+
 	for u := range finalUniqueURLs {
 		finalURLsEmail = append(finalURLsEmail, u)
 	}
@@ -736,7 +753,11 @@ func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan cha
 	// Send urlScanStarted event to the central channel
 	eventChan <- CheckResult{
 		EventName: "urlScanStarted",
-		Payload:   URLScanStartInfo{Total: len(finalURLsEmail)},
+		Payload: URLScanStartInfo{
+			Total:       len(finalURLsEmail),
+			Urls:        finalURLsEmail,
+			SkippedURLs: skippedURLs,
+		},
 	}
 	var urlWg sync.WaitGroup
 	verdictsChan := make(chan Verdict, len(finalURLsEmail))
@@ -744,7 +765,7 @@ func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan cha
 		urlWg.Add(1)
 		go func(url string) {
 			defer urlWg.Done()
-			if v, err := checkURLsVTotal(ctx, url); err == nil && v != nil {
+			if v, err := checkURLsVTotal(ctx, url, isRerun); err == nil && v != nil {
 				verdictsChan <- *v
 				// Stream individual result back to the central event channel
 				eventChan <- CheckResult{
