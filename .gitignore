@@ -10,3 +10,12 @@ Backend/tessdata/
 Backend/doc/
 /wikidata_websites4.db
 *.eml
+
+# Scratch files, test scripts, and patches
+Backend/test_*.py
+Backend/scratch.py
+Backend/create_emls.py
+script.py
+test_vt.js
+*.patch
+screenshots/

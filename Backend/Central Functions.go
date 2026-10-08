@@ -1424,10 +1424,76 @@ var defaultSharedHostingDomains string
 var (
 	sharedHostingDomainsMu sync.RWMutex
 	sharedHostingDomains   = make(map[string]struct{})
+
+	vtBetaThresholdMu  sync.RWMutex
+	vtBetaThresholdSet bool
+	vtBetaThresholdVal bool
 )
+
+type contextKey string
+
+const vtBetaThresholdContextKey contextKey = "vt_beta_threshold"
+
+// SetVTBetaThreshold allows enabling or disabling the relaxed VirusTotal suspicious threshold at runtime.
+func SetVTBetaThreshold(enabled bool) {
+	vtBetaThresholdMu.Lock()
+	defer vtBetaThresholdMu.Unlock()
+	vtBetaThresholdSet = true
+	vtBetaThresholdVal = enabled
+}
+
+// ResetVTBetaThreshold clears any runtime override and reverts to environment variables.
+func ResetVTBetaThreshold() {
+	vtBetaThresholdMu.Lock()
+	defer vtBetaThresholdMu.Unlock()
+	vtBetaThresholdSet = false
+	vtBetaThresholdVal = false
+}
+
+// WithVTBetaThreshold returns a child context carrying the beta threshold setting.
+func WithVTBetaThreshold(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, vtBetaThresholdContextKey, enabled)
+}
+
+// IsVTBetaThresholdEnabled returns true if the relaxed VirusTotal threshold is enabled.
+// It checks the provided context first (if any), then the runtime toggle, then environment variables.
+func IsVTBetaThresholdEnabled(ctx ...context.Context) bool {
+	if len(ctx) > 0 && ctx[0] != nil {
+		if val, ok := ctx[0].Value(vtBetaThresholdContextKey).(bool); ok {
+			return val
+		}
+	}
+
+	vtBetaThresholdMu.RLock()
+	isSet := vtBetaThresholdSet
+	val := vtBetaThresholdVal
+	vtBetaThresholdMu.RUnlock()
+	if isSet {
+		return val
+	}
+
+	for _, k := range []string{"BETA_VT_THRESHOLD", "VT_BETA_THRESHOLD", "BETA_SUSPICIOUS_THRESHOLD"} {
+		v := strings.ToLower(strings.TrimSpace(os.Getenv(k)))
+		if v == "true" || v == "1" || v == "yes" {
+			return true
+		}
+	}
+	return false
+}
+
+func loadVTBetaThreshold() {
+	for _, k := range []string{"BETA_VT_THRESHOLD", "VT_BETA_THRESHOLD", "BETA_SUSPICIOUS_THRESHOLD"} {
+		v := strings.ToLower(strings.TrimSpace(os.Getenv(k)))
+		if v == "true" || v == "1" || v == "yes" {
+			log.Println("Beta VT threshold enabled via environment (requires >=1 malicious or >=2 suspicious engines).")
+			return
+		}
+	}
+}
 
 func init() {
 	loadSharedHostingDomains()
+	loadVTBetaThreshold()
 }
 
 func parseSharedHostingDomains(content string) map[string]struct{} {
@@ -1558,6 +1624,9 @@ func checkDomainVTotal(ctx context.Context, domain string) (*Verdict, *DomainVTS
 	}
 
 	cacheKey := "domain:" + cleanDomain
+	if IsVTBetaThresholdEnabled(ctx) {
+		cacheKey = "domain:beta:" + cleanDomain
+	}
 	if v, stats, ok := getFromVTCache(cacheKey); ok {
 		return v, stats, http.StatusOK, nil
 	}
@@ -1608,7 +1677,12 @@ func checkDomainVTotal(ctx context.Context, domain string) (*Verdict, *DomainVTS
 	stats := result.Data.Attributes.LastAnalysisStats
 	score := stats.Malicious + stats.Suspicious
 	malicious := stats.Malicious > 0
-	finalDecision := malicious || score > 0
+	var finalDecision bool
+	if IsVTBetaThresholdEnabled(queryCtx) {
+		finalDecision = malicious || stats.Suspicious >= 2
+	} else {
+		finalDecision = malicious || score > 0
+	}
 
 	cats := []string{}
 	for _, c := range result.Data.Attributes.Categories {
@@ -1648,6 +1722,9 @@ func checkURLsVTotal(ctx context.Context, u string, bypassCacheOpt ...bool) (*Ve
 	}
 
 	cacheKey := "url:" + u
+	if IsVTBetaThresholdEnabled(ctx) {
+		cacheKey = "url:beta:" + u
+	}
 	if !bypassCache {
 		if cached, _, ok := getFromVTCache(cacheKey); ok {
 			log.Printf("Found in-memory cached scan for %s. Using cached result.", u)
@@ -1835,7 +1912,12 @@ func checkURLsVTotal(ctx context.Context, u string, bypassCacheOpt ...bool) (*Ve
 			}
 
 			malicious := result.Data.Attributes.Stats.Malicious > 0
-			finalDecision := malicious || score > 0
+			var finalDecision bool
+			if IsVTBetaThresholdEnabled(pollCtx) {
+				finalDecision = malicious || result.Data.Attributes.Stats.Suspicious >= 2
+			} else {
+				finalDecision = malicious || score > 0
+			}
 			reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL)
 
 			v := &Verdict{
@@ -1901,7 +1983,12 @@ func checkURLsVTotal(ctx context.Context, u string, bypassCacheOpt ...bool) (*Ve
 			}
 
 			malicious := result.Data.Attributes.LastAnalysisStats.Malicious > 0
-			finalDecision := malicious || score > 0
+			var finalDecision bool
+			if IsVTBetaThresholdEnabled(queryCtx) {
+				finalDecision = malicious || result.Data.Attributes.LastAnalysisStats.Suspicious >= 2
+			} else {
+				finalDecision = malicious || score > 0
+			}
 			reportURL := fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", targetEncoded)
 
 			return &Verdict{
@@ -1946,7 +2033,7 @@ func checkURLsVTotal(ctx context.Context, u string, bypassCacheOpt ...bool) (*Ve
 					baseEncoded := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(baseURLStr))
 					if baseVerdict, baseStatus, _ := getExistingReport(baseEncoded); baseStatus == http.StatusOK && baseVerdict != nil {
 						log.Printf("Found existing scan for base URL %s on VirusTotal. Using result for %s.", baseURLStr, u)
-						baseVerdict.Report = fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", encodedURL)
+						baseVerdict.Report = fmt.Sprintf("https://www.virustotal.com/gui/url/%s/detection", baseEncoded)
 						setInVTCache(cacheKey, baseVerdict, nil)
 						return baseVerdict, nil
 					}
@@ -1975,8 +2062,12 @@ func checkURLsVTotal(ctx context.Context, u string, bypassCacheOpt ...bool) (*Ve
 			}
 
 			if domainStatus == http.StatusOK && domainVerdict != nil && domainStats != nil {
-				// If domain is clean and established on VirusTotal (at least 1 harmless vote, 0 malicious, 0 suspicious)
-				if domainStats.Harmless >= 1 && domainStats.Malicious == 0 && domainStats.Suspicious == 0 {
+				// If domain is clean and established on VirusTotal (at least 1 harmless vote, 0 malicious, 0 suspicious or <2 if beta enabled)
+				cleanSuspiciousMax := 0
+				if IsVTBetaThresholdEnabled(ctx) {
+					cleanSuspiciousMax = 1
+				}
+				if domainStats.Harmless >= 1 && domainStats.Malicious == 0 && domainStats.Suspicious <= cleanSuspiciousMax {
 					log.Printf("Domain %s is verified clean on VirusTotal (%d harmless engines). Using domain reputation and queuing background scan for %s.", host, domainStats.Harmless, u)
 					submitURLInBackground(u)
 
@@ -1992,7 +2083,11 @@ func checkURLsVTotal(ctx context.Context, u string, bypassCacheOpt ...bool) (*Ve
 				}
 
 				// If domain has malicious or suspicious flags on VirusTotal, the full URL is checked fully.
-				if domainVerdict.FinalDecision || domainStats.Malicious > 0 || domainStats.Suspicious > 0 {
+				domainHasFlags := domainVerdict.FinalDecision || domainStats.Malicious > 0 || domainStats.Suspicious > 0
+				if IsVTBetaThresholdEnabled(ctx) {
+					domainHasFlags = domainVerdict.FinalDecision || domainStats.Malicious > 0 || domainStats.Suspicious >= 2
+				}
+				if domainHasFlags {
 					log.Printf("Domain %s has malicious/suspicious flags on VirusTotal (malicious: %d, suspicious: %d) — checking full URL %s fully...", host, domainStats.Malicious, domainStats.Suspicious, u)
 					// Fall through to submitAndPoll() so the full URL is checked fully!
 				}

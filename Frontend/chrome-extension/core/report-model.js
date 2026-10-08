@@ -320,6 +320,7 @@ function buildChecks(f) {
                     lost,
                     max: lost,
                     isGained: false,
+                    isWarning: true,
                     reason: `Domain "${sd}" is not recognized in official business registries.`,
                     severity: 55,
                 });
@@ -422,6 +423,7 @@ function buildChecks(f) {
                     lost,
                     max: lost,
                     isGained: false,
+                    isWarning: true,
                     reason: `Domain "${sd}" is not recognized in official business registries.`,
                     severity: 55,
                 });
@@ -433,6 +435,7 @@ function buildChecks(f) {
                     lost: MAX.domain,
                     max: MAX.domain,
                     isGained: false,
+                    isWarning: true,
                     reason: `Domain "${sd}" is not recognized in official business registries.`,
                     severity: 55,
                 });
@@ -557,6 +560,7 @@ function buildChecks(f) {
             }
             let isGained = earnedUrl > 0;
             let severity = 0;
+            let isWarning = false;
 
             if (f.maliciousCount > 0) {
                 title = "Dangerous Links Detected";
@@ -573,10 +577,11 @@ function buildChecks(f) {
             } else if (f.urlErrorCount > 0 && f.maliciousCount === 0) {
                 title = "Link Scan Incomplete";
                 reason = f.urlErrorCount === 1
-                    ? "1 link could not be scanned."
-                    : `${f.urlErrorCount} of ${count} links could not be scanned.`;
+                    ? "1 link skipped due to error."
+                    : `${f.urlErrorCount} of ${count} links skipped due to errors.`;
                 isGained = false;
-                severity = 40;
+                isWarning = true;
+                severity = 20;
             }
 
             checks.push({
@@ -586,6 +591,7 @@ function buildChecks(f) {
                 lost: lostUrl,
                 max: MAX.urls,
                 isGained,
+                isWarning,
                 reason,
                 severity,
             });

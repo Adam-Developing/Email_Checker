@@ -36,10 +36,26 @@ export function renderCheckRowsHtml(report) {
 
         const isJustCompleted = report.newlyCompletedKeys && report.newlyCompletedKeys.has(c.key);
         const animClass = isJustCompleted ? "ec-just-completed" : "";
-        const rowClass = c.couldNotRun ? "is-untested" : (c.isGained ? "is-gained" : "is-lost");
-        const pillText = c.couldNotRun
-            ? "Not run"
-            : (c.isGained ? `+${formatPoints(c.points)} pts` : `-${formatPoints(c.lost)} pts`);
+        let rowClass = "is-lost";
+        let pillText = `-${formatPoints(c.lost)} pts`;
+        
+        if (c.couldNotRun) {
+            rowClass = "is-untested";
+            pillText = "Not run";
+        } else if (c.isWarning) {
+            if (c.lost === 0) {
+                rowClass = "is-untested";
+                pillText = "Skipped";
+            } else {
+                rowClass = "is-warning";
+                pillText = `-${formatPoints(c.lost)} pts`;
+            }
+        } else if (c.isGained) {
+            rowClass = "is-gained";
+            pillText = `+${formatPoints(c.points)} pts`;
+        } else if (c.lost === 0) {
+            pillText = "0 pts";
+        }
         return `
             <div class="ec-point-row ${rowClass} ${animClass}" data-key="${escapeHtml(c.key)}">
                 <span class="ec-point-pill ${rowClass} ${animClass}">${pillText}</span>
@@ -57,9 +73,11 @@ export function renderUrlsHtml(report) {
         const isPending = u.kind === "pending";
         const isMal = u.kind === "malicious";
         const isSkipped = u.kind === "skipped";
-        const tagClass = isPending ? "is-pending" : isMal ? "is-malicious" : isSkipped ? "is-skipped" : "is-clean";
-        const tagLabel = isPending ? '<span class="ec-spinner-sm"></span> Checking…' : isMal ? "Flagged" : isSkipped ? "Skipped" : "Clean";
-        const note = u.reason ? `<span class="ec-url-note">(${escapeHtml(u.reason)})</span>` : "";
+        const isError = u.kind === "error";
+        const tagClass = isPending ? "is-pending" : isMal ? "is-malicious" : isSkipped ? "is-skipped" : isError ? "is-skipped" : "is-clean";
+        const tagLabel = isPending ? '<span class="ec-spinner-sm"></span> Checking…' : isMal ? "Flagged" : isSkipped ? "Skipped" : isError ? "Error" : "Clean";
+        const reasonText = u.reason || u.error;
+        const note = reasonText ? `<span class="ec-url-note">(${escapeHtml(reasonText)})</span>` : "";
         const link = u.report
             ? `<a class="ec-url-link" href="${escapeHtml(u.report)}" target="_blank" rel="noopener noreferrer">${escapeHtml(u.url)}</a>`
             : `<span class="ec-url-link">${escapeHtml(u.url)}</span>`;
@@ -420,9 +438,11 @@ export function updateReportPanel(container, report) {
                     const isPending = u.kind === "pending";
                     const isMal = u.kind === "malicious";
                     const isSkipped = u.kind === "skipped";
-                    const tagClass = isPending ? "is-pending" : isMal ? "is-malicious" : isSkipped ? "is-skipped" : "is-clean";
-                    const tagLabel = isPending ? '<span class="ec-spinner-sm"></span> Checking…' : isMal ? "Flagged" : isSkipped ? "Skipped" : "Clean";
-                    const note = u.reason ? `(${u.reason})` : "";
+                    const isError = u.kind === "error";
+                    const tagClass = isPending ? "is-pending" : isMal ? "is-malicious" : isSkipped ? "is-skipped" : isError ? "is-skipped" : "is-clean";
+                    const tagLabel = isPending ? '<span class="ec-spinner-sm"></span> Checking…' : isMal ? "Flagged" : isSkipped ? "Skipped" : isError ? "Error" : "Clean";
+                    const reasonText = u.reason || u.error;
+                    const note = reasonText ? `(${reasonText})` : "";
 
                     const existingLi = existingMap.get(u.url);
                     if (existingLi) {

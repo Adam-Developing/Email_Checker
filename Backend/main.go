@@ -320,7 +320,7 @@ func enableCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Force-Rerun, Cache-Control")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Force-Rerun, X-Beta-VT-Threshold, Cache-Control")
 		if r.Method == "OPTIONS" {
 			return
 		}
@@ -338,6 +338,17 @@ func streamEmailHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
 		return
 	}
+
+	// Support beta VT threshold request override via header or query parameter
+	reqCtx := r.Context()
+	if betaHeader := r.Header.Get("X-Beta-VT-Threshold"); betaHeader != "" {
+		reqCtx = WithVTBetaThreshold(reqCtx, strings.ToLower(betaHeader) == "true" || betaHeader == "1")
+	} else if betaQuery := r.URL.Query().Get("beta_vt_threshold"); betaQuery != "" {
+		reqCtx = WithVTBetaThreshold(reqCtx, strings.ToLower(betaQuery) == "true" || betaQuery == "1")
+	} else if betaQuery := r.URL.Query().Get("betaThreshold"); betaQuery != "" {
+		reqCtx = WithVTBetaThreshold(reqCtx, strings.ToLower(betaQuery) == "true" || betaQuery == "1")
+	}
+	r = r.WithContext(reqCtx)
 
 	// 2. Initial file processing
 	defer func(Body io.ReadCloser) {
@@ -659,6 +670,9 @@ func performURLAnalysis(wg *sync.WaitGroup, ch chan<- CheckResult, eventChan cha
 	htmlLinks := extractLinksFromHTML(Email.HTML)
 	for _, l := range htmlLinks {
 		decodedURL := html.UnescapeString(strings.TrimSpace(l.URL))
+		if decodedURL == "#" {
+			continue
+		}
 		if isSens, cat := checkSensitiveURL(decodedURL, l.Text); isSens {
 			if _, exists := skippedMap[decodedURL]; !exists {
 				skippedMap[decodedURL] = skippedInfo{category: cat}

@@ -243,3 +243,65 @@ func TestCheckDomainVTotalMock(t *testing.T) {
 		t.Errorf("expected phishStats to be identified as malicious")
 	}
 }
+
+func TestVTBetaThreshold(t *testing.T) {
+	// Helper to calculate finalDecision mimicking Central Functions.go logic
+	evaluateVerdict := func(ctx context.Context, maliciousCount int, suspiciousCount int) bool {
+		score := maliciousCount + suspiciousCount
+		malicious := maliciousCount > 0
+		if IsVTBetaThresholdEnabled(ctx) {
+			return malicious || suspiciousCount >= 2
+		}
+		return malicious || score > 0
+	}
+
+	// 1. When Beta Threshold is OFF:
+	SetVTBetaThreshold(false)
+	bgCtx := context.Background()
+
+	if !evaluateVerdict(bgCtx, 0, 1) {
+		t.Errorf("expected 1 suspicious engine to be flagged when beta flag is OFF")
+	}
+	if evaluateVerdict(bgCtx, 0, 0) {
+		t.Errorf("expected 0 engines to be clean when beta flag is OFF")
+	}
+	if !evaluateVerdict(bgCtx, 1, 0) {
+		t.Errorf("expected 1 malicious engine to be flagged when beta flag is OFF")
+	}
+
+	// 2. When Beta Threshold is ON:
+	SetVTBetaThreshold(true)
+
+	if evaluateVerdict(bgCtx, 0, 1) {
+		t.Errorf("expected 1 suspicious engine to NOT be flagged when beta flag is ON")
+	}
+	if !evaluateVerdict(bgCtx, 0, 2) {
+		t.Errorf("expected 2 suspicious engines to be flagged when beta flag is ON")
+	}
+	if !evaluateVerdict(bgCtx, 0, 3) {
+		t.Errorf("expected 3 suspicious engines to be flagged when beta flag is ON")
+	}
+	if !evaluateVerdict(bgCtx, 1, 0) {
+		t.Errorf("expected 1 malicious engine to be flagged when beta flag is ON")
+	}
+
+	// 3. Context override:
+	// Global is ON, but request context specifies FALSE
+	overrideDisabledCtx := WithVTBetaThreshold(bgCtx, false)
+	if !evaluateVerdict(overrideDisabledCtx, 0, 1) {
+		t.Errorf("expected context override (false) to flag 1 suspicious engine")
+	}
+
+	// Global is OFF, but request context specifies TRUE
+	SetVTBetaThreshold(false)
+	overrideEnabledCtx := WithVTBetaThreshold(bgCtx, true)
+	if evaluateVerdict(overrideEnabledCtx, 0, 1) {
+		t.Errorf("expected context override (true) to NOT flag 1 suspicious engine")
+	}
+	if !evaluateVerdict(overrideEnabledCtx, 0, 2) {
+		t.Errorf("expected context override (true) to flag 2 suspicious engines")
+	}
+
+	// Reset state
+	ResetVTBetaThreshold()
+}
